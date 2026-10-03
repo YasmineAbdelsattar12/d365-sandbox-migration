@@ -1,0 +1,17 @@
+{
+  "name": "d365-sandbox-migration",
+  "version": "1.0.0",
+  "description": "Audit and fix Dynamics 365 CRM plugin/workflow C# files for migration from Isolation Mode = None (full trust) to Sandbox (partial trust). Covers all blocked APIs, serializer replacements, HTTP hardening, and assembly re-registration.",
+  "author": {
+    "name": "LinkDev"
+  },
+  "keywords": [
+    "dynamics-365",
+    "crm",
+    "sandbox",
+    "plugin",
+    "migration",
+    "partial-trust",
+    "dotnet"
+  ]
+}
