@@ -1,9 +1,0 @@
-{
-  "plugins": [
-    {
-      "name": "d365-sandbox-migration",
-      "description": "Fully automated D365 CRM Sandbox migration tool. Scans, fixes, builds, and summarizes.",
-      "path": "."
-    }
-  ]
-}
