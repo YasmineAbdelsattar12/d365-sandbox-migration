@@ -22,31 +22,49 @@ Confirm the path exists and contains a `.csproj` file before proceeding.
 ## Step 2: Discover and Classify All Files
 
 1. Read the `.csproj` file to understand the project structure:
-   - Find all `<Compile Include="...">` entries (including linked files with `<Link>`)
+   - Find all `<Compile Include="...">` entries
    - Find all `<Reference>` and `<PackageReference>` entries
    - Find `<Import Project="...*.projitems">` for shared projects
    - Note the assembly name and output path
 
-2. Find all `.cs` files in the project directory (and linked paths).
+2. **Resolve linked files explicitly.** For every `<Compile Include="...">` entry in the `.csproj`:
+   - If it contains a `<Link>` child element, it is a **linked file** — the `Include` attribute is the real file path (often relative, e.g., `..\Common\SharedHelper.cs`). Resolve it relative to the `.csproj` directory to get the absolute path.
+   - If the `Include` path contains `..` (parent directory), it is a file outside the project folder — treat it as a linked/shared file.
+   - **Add every linked file to the scan list.** These files are compiled into the assembly and execute in Sandbox — they MUST be scanned and fixed.
+   - Log each linked file found: "Linked file: [resolved path] (from [Include value])"
 
-3. Classify each file:
+3. **Resolve shared projects.** For every `<Import Project="...*.projitems">`:
+   - Read the `.projitems` file
+   - Find all `<Compile Include="...">` entries inside it
+   - Resolve their paths relative to the `.projitems` file location
+   - Add them to the scan list
+
+4. Find all `.cs` files in the project directory itself (local files).
+
+5. **Merge into one complete file list**: local files + linked files + shared project files. Remove duplicates by absolute path.
+
+6. Classify each file:
    - **Plugin** — inherits from `IPlugin` or a custom base class like `PluginBase`
    - **Workflow Activity** — inherits from `CodeActivity` or a custom base class
    - **Helper / BLL / DAL / Utility** — called by plugin or workflow code
    - **DTO / Model** — data transfer objects used in serialization
    - **Full-trust only** — skip (unit tests, API controllers, console entry points)
 
-4. Build a dependency map: which helpers are called by which plugins/workflows. Only code reachable from plugin/workflow entry points is in scope.
+7. Build a dependency map: which helpers are called by which plugins/workflows. Only code reachable from plugin/workflow entry points is in scope.
 
-5. Report the discovery count to the developer: "Found X .cs files (Y plugins, Z workflows, W helpers/DTOs). Starting migration..."
+8. Report the discovery count to the developer: "Found X .cs files (Y local, Z linked/shared) — (A plugins, B workflows, C helpers/DTOs). Starting migration..."
+
+**CRITICAL**: If linked files are found, list them explicitly so the developer can see they are included. Linked files are the most common source of missed violations because they live outside the project folder.
 
 ## Step 3: Scan and Fix Every File
 
-Process files in dependency order — DTOs and helpers first, then plugins and workflows.
+Process ALL files from the complete file list (local + linked + shared) in dependency order — DTOs and helpers first, then plugins and workflows.
 
-For each in-scope `.cs` file:
+**Do NOT skip a file just because it lives outside the project folder.** Linked files compile into the same assembly and run in Sandbox. They need the same treatment as local files.
 
-1. **Read** the entire file.
+For each in-scope `.cs` file (whether local or linked):
+
+1. **Read** the entire file using its resolved absolute path.
 2. **Scan** for blocked APIs — consult `references/blocked-apis.md` for the full list.
 3. **Skip clean files** — if no violations, mark as clean and move on.
 4. **Fix violations in-place** using the Edit tool:
@@ -181,7 +199,7 @@ Build result: ✅ Success / ❌ Failed (with errors)
 ### Changes Made
 
 For each modified file, list:
-- File path
+- File path (mark linked files with **[LINKED]** so the developer knows they live outside the project folder)
 - What was changed (e.g., "Replaced JsonConvert with AppSerializer", "Added [DataContract] attributes", "Replaced HttpUtility.UrlEncode with Uri.EscapeDataString")
 - Lines affected
 
