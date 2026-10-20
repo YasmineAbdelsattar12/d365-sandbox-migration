@@ -48,9 +48,14 @@ Confirm the path exists and contains a `.csproj` file before proceeding.
    - **Workflow Activity** — inherits from `CodeActivity` or a custom base class
    - **Helper / BLL / DAL / Utility** — called by plugin or workflow code
    - **DTO / Model** — data transfer objects used in serialization
-   - **Full-trust only** — skip (unit tests, API controllers, console entry points)
+   - **Full-trust only** — skip ONLY if the file is clearly a unit test, API controller, or console entry point
 
-7. Build a dependency map: which helpers are called by which plugins/workflows. Only code reachable from plugin/workflow entry points is in scope.
+   **DEFAULT RULE: If a file is compiled into the plugin/workflow assembly (included in the `.csproj` either directly or via link), classify it as IN SCOPE unless it is clearly a unit test or API controller. When in doubt, scan it.** Linked library files like `Common`, `Utilities`, `Helpers`, `Extensions`, `Base` classes are almost always called from plugin code — do NOT skip them.
+
+7. **Do NOT build a full dependency map for linked/shared library files.** Tracing every caller in a large shared library is impractical and leads to files being wrongly skipped. Instead use this rule:
+   - If a `.cs` file is included in the `.csproj` (directly or via link) → it is compiled into the assembly → it runs in Sandbox → **scan it**
+   - The ONLY files to skip are those clearly not part of plugin execution: unit tests (`[TestClass]`, `[Fact]`), API controllers (`ApiController`, `ControllerBase`), console `Main()` entry points
+   - For individual METHODS within a scanned file, the caller verification rules in the "Caller Verification" section still apply
 
 8. Report the discovery count to the developer: "Found X .cs files (Y local, Z linked/shared) — (A plugins, B workflows, C helpers/DTOs). Starting migration..."
 
@@ -230,13 +235,16 @@ List any new files added (e.g., `AppSerializer.cs`).
 
 ## Caller Verification
 
+This section applies to individual METHODS, not to entire files. Never skip an entire file based on caller verification — if the file is in the `.csproj`, scan every method in it.
+
 Before fixing a method:
 
-1. Search for all callers across the project.
+1. Search for all callers **within the same assembly** (the current `.csproj` and its linked/shared files).
 2. **Zero callers from plugin/workflow code** → NOT a violation — do NOT change it.
 3. **Callers only in API/Portal projects** → do NOT change it.
 4. **Virtual/abstract methods** → check if any override is called from plugin code.
-5. Sandbox enforces at **execution time**, not **load time**. Dead code is safe.
+5. **Public methods in shared/linked library files** → if you CANNOT determine callers with certainty (large codebase, many possible callers), **err on the side of fixing it**. A false fix is harmless; a missed violation crashes at runtime.
+6. Sandbox enforces at **execution time**, not **load time**. Dead code is safe — but only skip a method if you are CERTAIN it has zero callers from plugin code.
 
 ## What NOT to Change
 
