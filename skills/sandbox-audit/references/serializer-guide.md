@@ -41,6 +41,31 @@ public class Contact
 }
 ```
 
+## Critical Rule: Property Names Are Case-Sensitive
+
+`JavaScriptSerializer` and Newtonsoft match JSON property names **case-insensitively** when deserializing. `DataContractJsonSerializer` is **case-sensitive**. A mismatch throws no error — the property silently comes back `null` / default.
+
+```csharp
+// JSON from the API: {"fileIds":"abc"}
+
+// Newtonsoft / JavaScriptSerializer: FileIds = "abc" (case-insensitive match)
+// DataContractJsonSerializer:        FileIds = null  (no match, no error!)
+public List<Guid> FileIds;
+
+// CORRECT — Name must match the JSON exactly
+[DataMember(Name = "fileIds")]
+public List<Guid> FileIds;
+```
+
+How to choose the `Name` value:
+
+| Situation | `Name` to use |
+|---|---|
+| Class is only **serialized** (we send it) | The C# member name as written — `JavaScriptSerializer` and Newtonsoft (default settings) output member names unchanged, so the JSON stays identical |
+| Class is **deserialized** (we receive it) | The exact casing of the JSON the other side sends. Find it from: `[JsonProperty("x")]` if present, sample JSON / tests / API docs in the repo, or the code that produces the JSON |
+| Newtonsoft used `CamelCasePropertyNamesContractResolver` or `NamingStrategy` | The transformed name (e.g. `FileIds` → `fileIds`) — check the `JsonSerializerSettings` in use |
+| Casing of incoming JSON cannot be determined | Use the C# member name AND list the class under **"Needs verification"** in the summary so the developer checks it against a real payload |
+
 ## DTO Visibility Rule
 
 In partial trust, DTO classes used with `DataContractJsonSerializer` **must be public**. Internal or private classes throw:
@@ -53,26 +78,42 @@ Fix: Change `internal class` to `public class`.
 
 ## Reusable AppSerializer Helper
 
-Use this helper throughout the codebase to replace all `JsonConvert` / `JavaScriptSerializer` calls:
+Use this helper throughout the codebase to replace all `JsonConvert` / `JavaScriptSerializer` calls.
+
+**Where it goes**: never create a new copy per project without checking first. Follow "Placing AppSerializer" in `SKILL.md` — reuse an existing copy in the solution, or create one in the shared helper folder and add it to each project as a linked file.
+
+**Why `internal`**: the same file gets linked into many assemblies. If it were `public`, a project that references two of those assemblies would get `CS0433: type exists in both` errors. `internal` keeps each copy private to its own assembly.
+
+**Namespace**: use the namespace of the folder it lives in (e.g. the shared helper library's root namespace), and add the matching `using` to every file that calls it.
 
 ```csharp
 using System.IO;
+using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 using System.Text;
 
-public static class AppSerializer
+internal static class AppSerializer
 {
     private static readonly Encoding Utf8NoBom = new UTF8Encoding(false);
+
+    // ISO 8601. 'FFFFFFF' = optional fractional seconds; 'K' = "Z" for UTC,
+    // "+03:00" for local, nothing for Unspecified. Accepts all of:
+    // 2026-10-29T10:00:00Z, 2026-10-29T10:00:00.123Z, 2026-10-29T10:00:00+02:00, 2026-10-29T10:00:00
+    private const string IsoDateFormat = "yyyy-MM-dd'T'HH:mm:ss.FFFFFFFK";
+
+    private static DataContractJsonSerializerSettings CreateSettings()
+    {
+        return new DataContractJsonSerializerSettings
+        {
+            UseSimpleDictionaryFormat = true,
+            DateTimeFormat = new DateTimeFormat(IsoDateFormat)
+        };
+    }
 
     public static string Serialize<T>(T obj)
     {
         if (obj == null) return null;
-        var settings = new DataContractJsonSerializerSettings
-        {
-            UseSimpleDictionaryFormat = true,
-            DateTimeFormat = new System.Runtime.Serialization.DateTimeFormat("yyyy-MM-dd'T'HH:mm:ss.fffZ")
-        };
-        var serializer = new DataContractJsonSerializer(typeof(T), settings);
+        var serializer = new DataContractJsonSerializer(typeof(T), CreateSettings());
         using (var ms = new MemoryStream())
         {
             serializer.WriteObject(ms, obj);
@@ -83,11 +124,7 @@ public static class AppSerializer
     public static T Deserialize<T>(string json)
     {
         if (string.IsNullOrEmpty(json)) return default(T);
-        var serializer = new DataContractJsonSerializer(typeof(T), new DataContractJsonSerializerSettings
-        {
-            UseSimpleDictionaryFormat = true,
-            DateTimeFormat = new System.Runtime.Serialization.DateTimeFormat("yyyy-MM-dd'T'HH:mm:ss.fffZ")
-        });
+        var serializer = new DataContractJsonSerializer(typeof(T), CreateSettings());
         using (var ms = new MemoryStream(Utf8NoBom.GetBytes(json)))
         {
             return (T)serializer.ReadObject(ms);
@@ -95,6 +132,8 @@ public static class AppSerializer
     }
 }
 ```
+
+**If the project already has an `AppSerializer`** using the old format `"yyyy-MM-dd'T'HH:mm:ss.fffZ"`: update it to the format above. The old format writes local times with a `Z` suffix (wrong by the UTC offset, e.g. 3 hours in Cairo) and throws `SerializationException` on dates without exactly 3 fractional digits.
 
 ## Replacing JavaScriptSerializer
 
@@ -158,16 +197,17 @@ string name = response.Contact.Name;
 
 ## DateTime Handling
 
-`DataContractJsonSerializer` defaults to `/Date(1234567890000)/` format, not ISO 8601. Fix with `DateTimeFormat` in settings (already included in the `AppSerializer` helper above):
+`DataContractJsonSerializer` defaults to `/Date(1234567890000)/` format. The `AppSerializer` helper sets ISO 8601 (`yyyy-MM-dd'T'HH:mm:ss.FFFFFFFK`) instead.
 
-```csharp
-var settings = new DataContractJsonSerializerSettings
-{
-    DateTimeFormat = new System.Runtime.Serialization.DateTimeFormat("yyyy-MM-dd'T'HH:mm:ss.fffZ")
-};
-```
+**The original serializer decides what the wire format was — keep it the same:**
 
-If the external API sends `/Date(...)/` format, omit the `DateTimeFormat` setting.
+| Original serializer | Its DateTime format | What to do |
+|---|---|---|
+| Newtonsoft (default) | ISO 8601 | `AppSerializer` as-is — output matches |
+| `JavaScriptSerializer` | `"\/Date(1730196000000)\/"` | **The format changes.** If the class being serialized contains any `DateTime` / `DateTime?` member, the receiving API may reject or misread ISO dates. Use a separate serializer instance **without** `DateTimeFormat` for that call (default `/Date(...)/` output), or confirm the receiver accepts ISO 8601. Either way, list it under **"Needs verification"** in the summary. If the class has no DateTime members, nothing changes. |
+| External API sends `/Date(...)/` | — | Deserialize with a serializer **without** `DateTimeFormat` |
+
+Never use a format ending in a literal `Z` (e.g. `"...ss.fffZ"`): `Z` is not a .NET format specifier, so it is written as a plain letter and a local time gets labelled as UTC.
 
 ## Dictionary Serialization
 
@@ -318,6 +358,9 @@ public partial class CustomerDto
 | `not serializable in partial trust because it is not public` | DTO class is `internal` | Change to `public class` |
 | Property silently missing from JSON | `[DataContract]` on class but `[DataMember]` missing on property | Add `[DataMember]` to every property that should serialize |
 | `DateTime` shows as `/Date(...)` | Default format, not ISO 8601 | Add `DateTimeFormat` to settings |
+| Property is `null` after deserialize, no error | JSON name casing differs from `[DataMember(Name)]` | Set `Name` to the exact JSON casing (see "Property Names Are Case-Sensitive") |
+| `SerializationException` parsing a date | Fixed format like `.fff` and the JSON has no / different fractional seconds | Use `FFFFFFFK` format from the `AppSerializer` helper |
+| Time off by the UTC offset | Format ends in literal `Z` | Use `K` instead of `Z` |
 | Dictionary shows as array of Key/Value | `UseSimpleDictionaryFormat` not set | Add `UseSimpleDictionaryFormat = true` |
 | `InvalidDataContractException` | No parameterless constructor | Add `public MyClass() { }` |
 | `SerializationException` on derived type | Missing `[KnownType]` | Add `[KnownType(typeof(Derived))]` on base |

@@ -6,13 +6,20 @@ Point it at your project → it scans every `.cs` file → fixes all violations 
 
 ## What It Does
 
-1. **Scans** all `.cs` files in your plugin/workflow project
-2. **Fixes** every Sandbox violation in-place (blocked APIs, serializers, HTTP hardening)
-3. **Removes** blocked NuGet packages and assembly references (System.Web, Newtonsoft.Json, log4net, etc.)
-4. **Adds** required references (System.Runtime.Serialization)
-5. **Builds** the project in Release mode
-6. **Fixes** any build errors caused by the migration
-7. **Produces** a full summary of everything changed
+1. **Scans** every compiled `.cs` file — local, linked (`<Link>`) and shared-project (`.projitems`) — with a bundled PowerShell scanner (`skills/sandbox-audit/scripts/scan.ps1`) that also shows which other projects link the same shared files
+2. **Checks git** for uncommitted changes first, so each project's migration can be reviewed and reverted on its own
+3. **Fixes** every live Sandbox violation in-place (blocked APIs, serializers, HTTP hardening) — shared files are only edited when a live call path is proven, and every project that links them is listed for rebuild
+4. **Reuses one shared `AppSerializer`** across the solution (linked from your helper folder) instead of creating a copy per project
+5. **Removes** blocked NuGet packages and assembly references (System.Web, Newtonsoft.Json, log4net, etc.)
+6. **Adds** required references (System.Runtime.Serialization)
+7. **Builds** the project in Release mode and fixes any build errors caused by the migration
+8. **Produces** a full summary — including what needs manual verification (JSON casing, date formats) and which projects to rebuild
+
+## Changelog
+
+- **1.2.0** — Bundled scanner script; git safety check; shared-file rule (no silent edits to files linked by many projects); reuse a shared `AppSerializer`; `AppSerializer` date fix (`K` instead of literal `Z`, optional fractional seconds); case-sensitive `[DataMember(Name)]` guidance; keep `.Result` where code catches `AggregateException`; Visual Studio "Reload Project" note; README fixes
+- **1.1.0** — Linked and shared-project files are always scanned
+- **1.0.0** — Initial release
 
 You get a clean Release build — just register it in XrmToolBox Plugin Registration Tool with Sandbox isolation mode.
 
@@ -21,7 +28,7 @@ You get a clean Release build — just register it in XrmToolBox Plugin Registra
 ### Repository URL
 
 ```
-https://github.com/AhmedYassineMaalworked/d365-sandbox-migration
+https://github.com/YasmineAbdelsattar12/d365-sandbox-migration
 ```
 
 ### For GitHub Copilot and Codex (Visual Studio / VS Code)
@@ -45,10 +52,12 @@ https://github.com/AhmedYassineMaalworked/d365-sandbox-migration
 After installation, type in the AI chat:
 
 ```
-/sandbox-audit
+/d365-sandbox-migration:sandbox-audit
 ```
 
 The tool will ask for your project path, then do everything automatically.
+
+**Requirements**: Windows with Visual Studio / MSBuild (to build the project) and PowerShell 5.1+ (built into Windows — used by the bundled scanner script).
 
 You can also say any of these:
 - "Migrate this project to sandbox"
