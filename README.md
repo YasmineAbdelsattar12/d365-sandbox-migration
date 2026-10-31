@@ -14,10 +14,12 @@ Point it at your project → it scans every `.cs` file → fixes all violations 
 6. **Adds** required references (System.Runtime.Serialization)
 7. **Builds** the project in Release mode and fixes any build errors caused by the migration
 8. **Checks Dataverse Online readiness** — every HTTP call and where its URL comes from (hard-coded, configuration record, workflow input, step config), IP/internal/`.local` addresses, Windows credentials, .NET Framework version, runtime DLL dependencies (plug-in packages don't support workflow activities), signing, assembly version, and service/HTTP calls inside loops
-9. **Produces** a full summary — with an Online Readiness verdict (✅ / ⚠️ / ❌), what the team must do before go-live, what needs manual verification (JSON casing, date formats) and which projects to rebuild
+9. **Creates a PDF report** (optional — asked at the start and again at the end) for documentation: summary, every change with the real code diff, blocked APIs left in place with evidence, items for the team, references, Online Readiness tables, build details and a test checklist. Built with Microsoft Edge in the background — nothing to install
+10. **Produces** a full summary — with an Online Readiness verdict (✅ / ⚠️ / ❌), what the team must do before go-live, what needs manual verification (JSON casing, date formats) and which projects to rebuild
 
 ## Changelog
 
+- **1.4.0** — Optional PDF migration report (`scripts/make-report.ps1`): asked at the start and again at the end, saved in the repo (`docs\sandbox-migration`) or Documents, with git diff since the run's starting commit, rendered to PDF via headless Edge/Chrome
 - **1.3.0** — Dataverse Online readiness: target environment choice; scanner traces every HTTP call's URL source and classifies hard-coded URLs (IP / internal / port / plain HTTP); detects plug-ins vs workflow activities, target framework, signing, assembly version, dependency candidates and calls inside loops; post-build DLL check (real dependencies, signature, version); new `online-checklist.md` (verified against Microsoft Learn and MC1515315); blocked-API list split into Blocked / Avoid and extended (IP URLs, Windows credentials, MemoryCache, `Settings.Default`); KeepAlive added to HTTP hardening; Newtonsoft and ILMerge guidance corrected
 - **1.2.0** — Bundled scanner script; git safety check; shared-file rule (no silent edits to files linked by many projects); reuse a shared `AppSerializer`; `AppSerializer` date fix (`K` instead of literal `Z`, optional fractional seconds); case-sensitive `[DataMember(Name)]` guidance; keep `.Result` where code catches `AggregateException`; Visual Studio "Reload Project" note; README fixes
 - **1.1.0** — Linked and shared-project files are always scanned

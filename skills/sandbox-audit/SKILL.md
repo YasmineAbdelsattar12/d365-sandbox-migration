@@ -5,7 +5,7 @@ description: "Fully automated Dynamics 365 CRM Sandbox migration tool, including
 
 # D365 Sandbox Migration — Automated Fix Tool
 
-Fully automated: scan → safety check → fix → clean references → build → verify → online readiness → summary.
+Fully automated: scan → safety check → fix → clean references → build → verify → online readiness → summary → PDF report (optional).
 The developer gets a clean Release build ready to register, plus a clear list of what still blocks go-live on Dataverse Online.
 
 This skill ships a scanner script at `scripts/scan.ps1` inside this skill's base directory (the "Base directory for this skill" path shown when the skill loads). Use it — it is faster and more consistent than grepping by hand.
@@ -17,6 +17,15 @@ This skill ships a scanner script at `scripts/scan.ps1` inside this skill's base
 - **On-premises, Sandbox only**: skip the online-only checks (framework rule, plug-in packages, internal endpoints become ⚠️ instead of ❌)
 
 If nobody answers, use **Dataverse Online** and say so in the summary.
+
+**PDF report.** In the same AskUserQuestion call, ask:
+
+> Create a PDF report of this migration at the end (for documentation)?
+- **Yes — save in the repo** (`<repo root>\docs\sandbox-migration\`, can be committed with the migration)
+- **Yes — save in my Documents folder** (`Documents\Sandbox Migration Reports\`)
+- **No**
+
+Remember the answer for Step 9. If nobody answers, treat it as **No** for now (Step 9 asks again).
 
 **Project.** If the current working directory contains exactly one `.csproj`, use it and say so. Otherwise ask the developer:
 
@@ -81,7 +90,8 @@ Before editing anything:
    - **New branch** — run `git switch -c sandbox/<ProjectName>` and continue
    - **Continue anyway**
 4. Never commit, stash or discard on the developer's behalf unless they ask.
-5. If the folder is not a git repository, or nobody answers, continue and note it in the summary ("Changes were made without a clean git baseline").
+5. Record the starting point for the report: `git -C "<project folder>" rev-parse --short HEAD` (**base commit**, after any commit the developer made in this step) and `git config user.name` (**author**).
+6. If the folder is not a git repository, or nobody answers, continue and note it in the summary ("Changes were made without a clean git baseline").
 
 ## Step 4: Analyse and Fix
 
@@ -339,6 +349,20 @@ Then **calls inside loops** (⚠️, report only) and **What your team must do b
 4. Online: enable the **Plug-in Trace Log** (Settings → Administration → System Settings → Customization) for the first test runs — it replaces Event Log / file logging.
 5. Rebuild and re-register every project under "Projects to rebuild".
 6. Test: [list key scenarios based on what changed — every HTTP call, every serialized payload, every "Needs verification" item].
+
+## Step 9: PDF Report
+
+1. **Decide.** If the developer chose a report location in Step 1, continue. If they chose **No** or did not answer, ask once more now (AskUserQuestion): "Want a PDF report of this migration for your documentation?" with the same three options. If nobody is there to answer, skip the report.
+2. **Write `report-data.json`** (UTF-8) in the scratchpad or `%TEMP%`, following `references/report-schema.md`. Fill it from the summary you just wrote — same facts, same wording, plain text. Include in `ChangedPaths` every file modified or created in this run (absolute paths, including the `.csproj` and `packages.config`), and set `BaseCommit` / `Author` from Step 3.
+3. **Output folder:**
+   - Repo: `<repo root>\docs\sandbox-migration`
+   - Documents: `[Environment]::GetFolderPath('MyDocuments')` + `\Sandbox Migration Reports`
+4. **Run:**
+   ```
+   powershell -NoProfile -ExecutionPolicy Bypass -File "<skill base dir>\scripts\make-report.ps1" -Data "<report-data.json>" -Scan "<scanner JSON from Step 2>" -Repo "<repo root>" -OutDir "<output folder>" -Open
+   ```
+   The script builds an HTML report with the real code diff since the base commit and converts it to PDF with Microsoft Edge (or Chrome) in headless mode, then opens it. Omit `-Repo` if the project is not in git.
+5. **Tell the developer** the PDF path in one line. If the script says the PDF was not created (no Edge/Chrome), give the HTML path and say: open it and use **Print → Save as PDF**. If it was saved in the repo, mention it will show up in Git Changes and can be committed with the migration.
 
 ## What NOT to Change
 
