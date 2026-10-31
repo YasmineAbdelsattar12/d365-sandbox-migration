@@ -1,6 +1,11 @@
 # Blocked APIs in Sandbox (Partial Trust)
 
-These APIs throw `SecurityException` at runtime when called from a Sandbox-registered plugin or workflow activity assembly.
+Two levels:
+
+- **Blocked** — fails at runtime (usually `SecurityException`) when executed in a Sandbox-registered plug-in or workflow activity. Fix every live call.
+- **Avoid** — not blocked by the Sandbox itself, but unsupported or unreliable in plug-ins (behaviour undefined, silent wrong results, or blocked by the online network rules). Fix when the replacement is mechanical and behaviour-preserving; otherwise report it.
+
+Rows are **Blocked** unless marked *(Avoid)*. For Dataverse Online, also apply `online-checklist.md`.
 
 ## File System & I/O
 
@@ -35,8 +40,17 @@ These APIs throw `SecurityException` at runtime when called from a Sandbox-regis
 | `ConfigurationManager.ConnectionStrings` | `System.Configuration` | Plugin Secure Configuration (encrypted) |
 | `WebConfigurationManager` | `System.Web.Configuration` | Plugin Configuration or D365 Environment Variables |
 | `Environment.GetEnvironmentVariable` | `System` | Plugin Configuration or CRM entity records |
+| `Properties.Settings.Default.X` / `Settings.Default` | `System.Configuration` | Reads `app.config`, which the Sandbox worker never loads — use Plugin Configuration, environment variables or configuration records |
+| `app.config` / `web.config` values of any kind | — | Same as above — the file is not deployed with a plug-in |
 
 **D365 Environment Variables** (v9.1+): Use `RetrieveMultiple` on `environmentvariabledefinition` and `environmentvariablevalue` entities.
+
+## Caching
+
+| Blocked API | Namespace | Replacement |
+|---|---|---|
+| `MemoryCache.Default`, `new MemoryCache(...)`, `ObjectCache`, `CacheItemPolicy` | `System.Runtime.Caching` | No cache (query each execution), or a `static` `ConcurrentDictionary` with your own expiry — per Sandbox worker process only, may be recycled at any time, never shared between servers |
+| `HttpRuntime.Cache`, `System.Web.Caching.Cache` | `System.Web` | Same as above |
 
 ## System.Web (entire assembly blocked)
 
@@ -64,11 +78,11 @@ These APIs throw `SecurityException` at runtime when called from a Sandbox-regis
 | `JObject`, `JArray`, `JToken` | `Newtonsoft.Json.Linq` | `DataContractJsonSerializer` with typed DTOs |
 | `[JsonProperty]` | `Newtonsoft.Json` | `[DataMember(Name = "...")]` |
 | `[JsonIgnore]` | `Newtonsoft.Json` | Omit `[DataMember]` (requires `[DataContract]` on class) |
-| `[JsonConverter]` | `Newtonsoft.Json` | `[KnownType]` + `[DataContract]` hierarchy |
+| `[JsonConverter]` | `Newtonsoft.Json` | A string-backed `[DataMember]` property that converts in its getter/setter (see Enum Serialization in `serializer-guide.md`); use `[KnownType]` only when the converter was handling polymorphism |
 | `[JsonConstructor]` | `Newtonsoft.Json` | Parameterless constructor (required by `DataContractJsonSerializer`) |
 | `[JsonRequired]` | `Newtonsoft.Json` | `[DataMember(IsRequired = true)]` |
 
-**Note**: Newtonsoft.Json is only blocked if ILMerged into the plugin assembly. If it's a separate NuGet not deployed to CRM, it's not a concern.
+**Note on Newtonsoft.Json**: it is not part of the platform. If the compiled plug-in DLL references it, the DLL has to travel with the plug-in — via ILMerge (not supported by Microsoft) or a plug-in package (online only, and **not available for custom workflow activities**). If it is neither merged nor packaged, the assembly fails to load. Newtonsoft also uses reflection that can fail in partial trust. Replace it with `DataContractJsonSerializer` in all plug-in code; it stays fine in full-trust API/Portal projects.
 
 ## Networking
 
@@ -82,13 +96,18 @@ These APIs throw `SecurityException` at runtime when called from a Sandbox-regis
 | `WebSocket`, `ClientWebSocket` | `System.Net.WebSockets` | Azure SignalR or external HTTP |
 | `Ping` | `System.Net.NetworkInformation` | External health-check HTTP endpoint |
 | Localhost URLs (`http://localhost`, `http://127.0.0.1`) | — | External routable URL |
-| Non-standard ports (not 80/443) | — | Use ports 80 (HTTP) or 443 (HTTPS) only |
+| **IP-address URLs** (`http://10.1.2.15/api`, even public IPs) | — | A DNS host name — Microsoft requires "a named web address that requires DNS name resolution" |
+| **Windows credentials**: `UseDefaultCredentials = true`, `CredentialCache.DefaultCredentials` / `DefaultNetworkCredentials`, NTLM/Kerberos to internal services | `System.Net` | Anonymous calls with an API key / OAuth client-credentials token from Secure Configuration |
+| Non-standard ports (not 80/443) *(Avoid)* | — | Not documented as blocked, but often stopped by firewalls — prefer 443 |
+| Endpoints inside the company network *(Avoid on-prem, ❌ online)* | — | See `online-checklist.md` → Network Access |
 
-**Safe**: `HttpWebRequest`, `WebClient`, `HttpClient` to external URLs on ports 80/443 with TLS 1.2.
+**Safe**: `HttpWebRequest`, `WebClient`, `HttpClient` to DNS-named external URLs over HTTPS with TLS 1.2, anonymous or token authentication.
 
-## Threading & Async
+## Threading & Async *(Avoid — whole section)*
 
-| Blocked API | Namespace | Replacement |
+Microsoft does not support multi-threading in plug-ins: work started on another thread can outlive the execution, `IOrganizationService` is not thread-safe, and exceptions on background threads are lost or crash the worker. Replace when the fix is mechanical (fire-and-forget → synchronous call); otherwise report.
+
+| API | Namespace | Replacement |
 |---|---|---|
 | `new Thread(work).Start()` | `System.Threading` | Synchronous execution |
 | `Task.Run(() => ...)` (fire-and-forget) | `System.Threading.Tasks` | Synchronous call or async plugin step |

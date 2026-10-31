@@ -1,6 +1,6 @@
 # D365 Sandbox Migration Plugin
 
-Fully automated tool that migrates Dynamics 365 CRM plugin and workflow activity projects from **Isolation Mode = None** (full trust) to **Sandbox** (partial trust).
+Fully automated tool that migrates Dynamics 365 CRM plugin and workflow activity projects from **Isolation Mode = None** (full trust) to **Sandbox** (partial trust) — and checks whether they are ready for **Dataverse Online** (on-prem → cloud).
 
 Point it at your project → it scans every `.cs` file → fixes all violations → removes blocked references → builds Release → gives you a clean `.dll` ready for XrmToolBox.
 
@@ -13,10 +13,12 @@ Point it at your project → it scans every `.cs` file → fixes all violations 
 5. **Removes** blocked NuGet packages and assembly references (System.Web, Newtonsoft.Json, log4net, etc.)
 6. **Adds** required references (System.Runtime.Serialization)
 7. **Builds** the project in Release mode and fixes any build errors caused by the migration
-8. **Produces** a full summary — including what needs manual verification (JSON casing, date formats) and which projects to rebuild
+8. **Checks Dataverse Online readiness** — every HTTP call and where its URL comes from (hard-coded, configuration record, workflow input, step config), IP/internal/`.local` addresses, Windows credentials, .NET Framework version, runtime DLL dependencies (plug-in packages don't support workflow activities), signing, assembly version, and service/HTTP calls inside loops
+9. **Produces** a full summary — with an Online Readiness verdict (✅ / ⚠️ / ❌), what the team must do before go-live, what needs manual verification (JSON casing, date formats) and which projects to rebuild
 
 ## Changelog
 
+- **1.3.0** — Dataverse Online readiness: target environment choice; scanner traces every HTTP call's URL source and classifies hard-coded URLs (IP / internal / port / plain HTTP); detects plug-ins vs workflow activities, target framework, signing, assembly version, dependency candidates and calls inside loops; post-build DLL check (real dependencies, signature, version); new `online-checklist.md` (verified against Microsoft Learn and MC1515315); blocked-API list split into Blocked / Avoid and extended (IP URLs, Windows credentials, MemoryCache, `Settings.Default`); KeepAlive added to HTTP hardening; Newtonsoft and ILMerge guidance corrected
 - **1.2.0** — Bundled scanner script; git safety check; shared-file rule (no silent edits to files linked by many projects); reuse a shared `AppSerializer`; `AppSerializer` date fix (`K` instead of literal `Z`, optional fractional seconds); case-sensitive `[DataMember(Name)]` guidance; keep `.Result` where code catches `AggregateException`; Visual Studio "Reload Project" note; README fixes
 - **1.1.0** — Linked and shared-project files are always scanned
 - **1.0.0** — Initial release
@@ -83,7 +85,9 @@ All Sandbox-blocked API categories:
 - **Cryptography** — Key persistence, X509Store, DPAPI
 - **XML** — DTD processing, XSL scripting
 - **Logging** — log4net, NLog, Serilog → ITracingService
+- **Caching** — MemoryCache / ObjectCache
 - **Miscellaneous** — LDAP, WCF non-HTTP, WMI, VisualBasic
+- **Dataverse Online** — no IP addresses or localhost, no Windows credentials, internal endpoints, .NET 4.6.2 / 4.8, ILMerge vs plug-in packages, signing, 16 MB, 2-minute limit
 
 ## What It Does NOT Change
 

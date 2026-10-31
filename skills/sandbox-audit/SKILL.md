@@ -1,18 +1,24 @@
 ---
 name: "sandbox-audit"
-description: "Fully automated Dynamics 365 CRM Sandbox migration tool. Scans all C# files in a plugin/workflow project (including linked and shared-project files), fixes every Sandbox violation in-place, removes blocked NuGet packages and references, builds in Release mode, fixes build errors, and produces a summary. Triggers on: 'sandbox migration', 'audit for sandbox', 'sandbox violation', 'partial trust', 'isolation mode', 'none to sandbox', 'full trust to sandbox', 'plugin sandbox', 'migrate to sandbox'."
+description: "Fully automated Dynamics 365 CRM Sandbox migration tool, including Dataverse Online readiness. Scans all C# files in a plugin/workflow project (including linked and shared-project files), fixes every Sandbox violation in-place, removes blocked NuGet packages and references, builds in Release mode, fixes build errors, checks online readiness (endpoints, .NET version, dependencies, signing, version) and produces a summary. Triggers on: 'sandbox migration', 'audit for sandbox', 'sandbox violation', 'partial trust', 'isolation mode', 'none to sandbox', 'full trust to sandbox', 'plugin sandbox', 'migrate to sandbox', 'migrate plugins to online', 'dataverse online readiness', 'on-prem to online'."
 ---
 
 # D365 Sandbox Migration — Automated Fix Tool
 
-Fully automated: scan → safety check → fix → clean references → build → verify → summary.
-The developer gets a clean Release build ready to register in XrmToolBox.
+Fully automated: scan → safety check → fix → clean references → build → verify → online readiness → summary.
+The developer gets a clean Release build ready to register, plus a clear list of what still blocks go-live on Dataverse Online.
 
 This skill ships a scanner script at `scripts/scan.ps1` inside this skill's base directory (the "Base directory for this skill" path shown when the skill loads). Use it — it is faster and more consistent than grepping by hand.
 
-## Step 1: Get the Project Path
+## Step 1: Get the Project Path and Target
 
-If the current working directory contains exactly one `.csproj`, use it and say so. Otherwise ask the developer:
+**Target environment.** Ask once (AskUserQuestion, together with the project question if both are needed) unless the developer already said:
+- **Dataverse Online** (default — moving from on-prem to the cloud): run every check, including Step 7 Online Readiness against `references/online-checklist.md`
+- **On-premises, Sandbox only**: skip the online-only checks (framework rule, plug-in packages, internal endpoints become ⚠️ instead of ❌)
+
+If nobody answers, use **Dataverse Online** and say so in the summary.
+
+**Project.** If the current working directory contains exactly one `.csproj`, use it and say so. Otherwise ask the developer:
 
 > What is the path to your D365 plugin or workflow activity project folder?
 > (The folder containing the `.csproj` file)
@@ -45,8 +51,14 @@ Confirm the path exists and contains a `.csproj` file before proceeding.
    | `References`, `PackagesConfig`, `PackageReferences`, `ProjectReferences` | Inputs for Step 5 |
    | `ExistingAppSerializers[]` | `Path`, `Namespace`, `Visibility`, `OldDateFormat`, `LinkedBy` — input for "Placing AppSerializer" |
    | `ProjectStyle` | `legacy` (old-style `.csproj` / `packages.config`) or `sdk` |
+   | `OnlineReadiness.TargetFramework` / `.Signing` / `.AssemblyVersion` | `Status` + `Note` for each — input for Step 7 |
+   | `OnlineReadiness.EntryPoints` | Plug-in and workflow-activity classes (resolved through custom base classes). `ContainsWorkflowActivities` decides whether plug-in packages are possible |
+   | `OnlineReadiness.DependencyCandidates` | Non-framework references / packages / project references — confirmed against the compiled DLL in Step 6 |
+   | `OnlineReadiness.HttpCalls[]` | Every HTTP call: `Call`, `UrlExpr`, best-effort `UrlSource` (`Hardcoded` / `Configuration` / `WorkflowInput` / `StepConfig` / `Parameter` / `Relative` / `Unknown`), `UrlKey`, `Url`, `UrlClass`, `InLoop` |
+   | `OnlineReadiness.UrlLiterals[]` | Every hard-coded URL with `Class`: `Blocked` (IP / localhost / protocol), `Internal` (single-label host, `.local`, …), `Avoid` (port), `Review` (plain http), `LooksPublic`, `Unknown` |
+   | `OnlineReadiness.LoopRisks[]` | Organization-service or HTTP calls inside loops (2-minute limit risk) |
 
-   Severity meanings: **Blocked** = throws in Sandbox if executed · **Review** = depends on usage, read in context · **Harden** = allowed, apply HTTP hardening · **Using** = namespace import only.
+   Severity meanings: **Blocked** = fails in Sandbox if executed · **Avoid** = unsupported or unreliable in plug-ins · **Review** = depends on usage, read in context · **Harden** = allowed, apply HTTP hardening · **Using** = namespace import only.
 
 4. Report discovery to the developer: "Found X compiled .cs files (Y local, Z linked, W shared) — N hits in M files (B blocked, R review, H HTTP calls)." Then **list every linked and shared file explicitly**. Linked files are the most common source of missed violations because they live outside the project folder.
 
@@ -83,6 +95,8 @@ Process DTOs and helpers first, then plugins and workflows. For each hit, decide
 2. **In a `local` file** → apply caller verification (below), then fix if live.
 3. **In a `linked` or `shared` file** → follow **Shared File Rule** below.
 4. **Review hits** → read the code; fix only if it actually violates Sandbox (e.g. `StreamReader` on a file path, not on a stream).
+5. **Avoid hits** → fix only when the replacement is mechanical and keeps behaviour (e.g. a fire-and-forget `new Thread(() => Log(x)).Start()` → `Log(x)`); otherwise report under "Needs decision".
+6. **Network design hits** — IP-address or internal URLs, Windows credentials (`UseDefaultCredentials`, `CredentialCache.DefaultCredentials`) → **never change the URL or the authentication** yourself. These need an infrastructure decision (public DNS name, API Management, token auth). Report them in Step 7.
 
 Fix in-place with the Edit tool:
 - Replace blocked API calls with Sandbox-safe alternatives (`references/blocked-apis.md`)
@@ -124,9 +138,10 @@ Applies to individual METHODS, never to whole files.
 For every outbound call (`Harden` hits), ensure:
 1. `ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;` before the call
 2. Timeout ≤ 90 seconds (`client.Timeout` / `request.Timeout`)
-3. `.GetAwaiter().GetResult()` instead of `.Result` — except as below
-4. `InvalidPluginExecutionException` instead of generic `Exception` / `InvalidOperationException`
-5. Response body read before the status check
+3. KeepAlive disabled — `request.KeepAlive = false;` / `client.DefaultRequestHeaders.ConnectionClose = true;` (Microsoft guidance for sandboxed calls)
+4. `.GetAwaiter().GetResult()` instead of `.Result` — except as below
+5. `InvalidPluginExecutionException` instead of generic `Exception` / `InvalidOperationException`
+6. Response body read before the status check
 
 ### `.Result` → `.GetAwaiter().GetResult()` — exception
 
@@ -172,7 +187,7 @@ Search `packages.config` or `<PackageReference>` for:
 
 | Package | Action |
 |---|---|
-| `Newtonsoft.Json` | Remove IF all usages have been replaced AND the package is ILMerged into the plugin assembly. If not ILMerged, leave it. |
+| `Newtonsoft.Json` | Remove the package and `<Reference>` once all usages in compiled code are replaced (including dead code in linked files — otherwise the build breaks; then keep it and confirm in Step 6 that the compiled DLL no longer references it). |
 | `System.Web` | Remove the reference |
 | `log4net` | Remove package and reference |
 | `NLog` | Remove package and reference |
@@ -202,7 +217,7 @@ If packages were removed from `packages.config`, also remove the corresponding `
    ```
    msbuild "ProjectName.csproj" /p:Configuration=Release /t:Rebuild
    ```
-2. If the build **succeeds**: proceed to Step 7.
+2. If the build **succeeds**: continue with item 5 below, then Step 7.
 3. If the build **fails**: fix each error —
    - **Missing type/namespace** after removing a reference → a usage was missed; fix the code or restore the reference
    - **Missing `using`** → add it
@@ -211,8 +226,40 @@ If packages were removed from `packages.config`, also remove the corresponding `
    - **Type not public** → make the DTO `public`
    - **Missing parameterless constructor** → add `public ClassName() { }`
 4. Rebuild after fixes, max 5 attempts. If still failing, stop and report the remaining errors.
+5. **Inspect the compiled DLL** (use Windows PowerShell `powershell` — `ReflectionOnlyLoadFrom` is not available in PowerShell 7):
+   ```powershell
+   $dll = (Resolve-Path "bin\Release\<Assembly>.dll").Path
+   $n = [System.Reflection.AssemblyName]::GetAssemblyName($dll)
+   "Version: $($n.Version)  PublicKeyToken: $(-join ($n.GetPublicKeyToken() | % { $_.ToString('x2') }))  Size: $((Get-Item $dll).Length) bytes"
+   [System.Reflection.Assembly]::ReflectionOnlyLoadFrom($dll).GetReferencedAssemblies() | % { "$($_.Name) $($_.Version)" }
+   ```
+   - **Runtime dependencies** = referenced assemblies other than `mscorlib`, `netstandard`, `System*`, `Microsoft.CSharp`, `Microsoft.Xrm.Sdk*`, `Microsoft.Crm.Sdk.Proxy`. This is the real list — `DependencyCandidates` from the scan are only `.csproj` entries.
+   - **Signed** = the public key token is not empty.
+   - **Version** = compare major.minor with the version at the last commit (`git show HEAD:<path of AssemblyInfo.cs or .csproj>`). If major or minor changed, warn: the Plugin Registration Tool treats it as a different assembly, so the in-place update fails or steps/workflows stay bound to the old one.
 
-## Step 7: Write Summary
+## Step 7: Online Readiness
+
+Skip the online-only rows when the target is on-premises (Step 1). Use `references/online-checklist.md` for the rules and wording.
+
+1. **HTTP endpoint inventory** — one row per entry in `OnlineReadiness.HttpCalls`. The scanner's `UrlSource` is a best-effort trace: open the code and confirm it, and resolve `Unknown` / `Relative` / `Parameter` rows yourself (for `Parameter`, follow the caller one level up). Status per row:
+   | Source | Status |
+   |---|---|
+   | Hard-coded, `UrlClass` = `Blocked` (IP, localhost, non-http) | ❌ |
+   | Hard-coded, `Internal` (single-label host, `.local` …) | ❌ online / ⚠️ on-prem |
+   | Hard-coded, `Avoid` (port) or `Review` (plain http) | ⚠️ |
+   | Hard-coded, `LooksPublic` https | ✅ (note "confirm it resolves publicly") |
+   | `Configuration` / `WorkflowInput` / `StepConfig` / `Parameter` | ⚠️ "confirm the value is a public HTTPS DNS name" — name the key / argument and where it is read |
+   | Any call using Windows credentials | ❌ |
+2. **Project checks**: `TargetFramework`, `Signing`, version (Step 6, item 5), size ≤ 16 MB.
+3. **Dependencies** — from the compiled DLL (Step 6, item 5):
+   - none → ✅
+   - some, and `ContainsWorkflowActivities` → ❌ "plug-in packages don't support workflow activities — compile the code in via linked files or remove the dependency"
+   - some, plug-ins only → ⚠️ "deploy as a plug-in package, or remove the dependency"
+4. **Loop risks** — each `LoopRisks` entry → ⚠️ with file, line and loop line. Report only; do not redesign.
+5. **Overall**: ❌ if any row is ❌, else ⚠️ if any row is ⚠️, else ✅.
+6. **What the team must do before go-live** — a short numbered list built from every ❌ and ⚠️ row, most serious first.
+
+## Step 8: Write Summary
 
 ### Migration Summary
 
@@ -227,6 +274,8 @@ Files skipped (full-trust only): K
 Build result: ✅ Success / ❌ Failed (with errors)
 Output: bin\Release\[Assembly].dll, [size] (limit 16 MB)
 Git baseline: clean / uncommitted changes present / not a git repo
+Target: Dataverse Online / On-premises Sandbox
+Online readiness: ✅ Ready / ⚠️ Needs work (N items) / ❌ Blocked (N items)
 ```
 
 ### Linked & Shared Files Scanned
@@ -261,13 +310,35 @@ Every project in `SharedBy` of any shared file that was edited — they all comp
 
 Removed / kept (with reason) / added.
 
+### Online Readiness
+
+From Step 7, in this shape:
+
+```
+Online Readiness: ⚠️ Needs work (2 items)
+
+Target framework:  ✅ .NET 4.6.2
+Signed:            ✅ <key file>
+Version:           ✅ 1.0.0.0 → 1.0.0.0 (in-place update OK)
+Dependencies:      ✅ none (Contracts compiled in via linked files)
+Size:              ✅ 277 KB (limit 16 MB)
+```
+
+| # | Class / method | Call | URL comes from | Status |
+|---|---|---|---|---|
+| 1 | MigrateNotesToDocuments.Execute | POST | Config record `DocumentsApiUrl` | ⚠️ Confirm it's a public HTTPS DNS name |
+| 2 | … | … | Hard-coded `http://10.1.2.15/api` | ❌ IP address — not allowed online |
+
+Then **calls inside loops** (⚠️, report only) and **What your team must do before go-live** (numbered, most serious first).
+
 ### Next Steps for Developer
 
 1. **If a file was added to the `.csproj`** (e.g. `AppSerializer.cs` linked or created): in Visual Studio, right-click the project → **Reload Project** (or reopen the solution) — Solution Explorer does not show files added outside VS until it reloads.
 2. Review the diff and commit this project's migration as its own commit.
-3. Open **XrmToolBox → Plugin Registration Tool**, update the assembly with the `.dll` from `bin\Release\`, set Isolation Mode to **Sandbox**, and confirm all steps are still registered.
-4. Rebuild and re-register every project under "Projects to rebuild".
-5. Test: [list key scenarios based on what changed — every HTTP call, every serialized payload, every "Needs verification" item].
+3. Open **XrmToolBox → Plugin Registration Tool** (connected to the target environment), update the assembly with the `.dll` from `bin\Release\`, set Isolation Mode to **Sandbox** (online: always Sandbox), and confirm all steps are still registered.
+4. Online: enable the **Plug-in Trace Log** (Settings → Administration → System Settings → Customization) for the first test runs — it replaces Event Log / file logging.
+5. Rebuild and re-register every project under "Projects to rebuild".
+6. Test: [list key scenarios based on what changed — every HTTP call, every serialized payload, every "Needs verification" item].
 
 ## What NOT to Change
 
@@ -278,5 +349,6 @@ Removed / kept (with reason) / added.
 - Code in `#if DEBUG` blocks
 - Newtonsoft.Json in non-plugin assemblies
 - Business logic, validation rules, error messages
+- Endpoint URLs, authentication design, or loop/batching design — report them in Online Readiness instead
 - Comments (unless they reference a removed API by name)
 - Any code that is not a Sandbox violation

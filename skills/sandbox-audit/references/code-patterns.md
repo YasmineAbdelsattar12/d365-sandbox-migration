@@ -16,6 +16,7 @@ public string CallExternalApi(string url, string payload, ITracingService tracer
     request.Method = "POST";
     request.ContentType = "application/json";
     request.Timeout = 90000; // 2. Max 90 seconds (platform kills at 120s)
+    request.KeepAlive = false; // Microsoft guidance for sandboxed calls
 
     // Write request body
     using (var writer = new StreamWriter(request.GetRequestStream()))
@@ -76,9 +77,20 @@ var result = httpClient.GetAsync(url).GetAwaiter().GetResult();
 using (var client = new HttpClient())
 {
     client.Timeout = TimeSpan.FromSeconds(90);
+    client.DefaultRequestHeaders.ConnectionClose = true; // disable KeepAlive
     // ... use client
 }
 ```
+
+### Hardening checklist (every outbound call)
+
+1. `ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;` before the call
+2. Explicit timeout ≤ 90 s
+3. KeepAlive disabled (`request.KeepAlive = false` / `client.DefaultRequestHeaders.ConnectionClose = true`)
+4. `.GetAwaiter().GetResult()` instead of `.Result` (see the `AggregateException` exception in `SKILL.md`)
+5. Response body read before the status check
+6. `InvalidPluginExecutionException` for failures
+7. DNS host name over HTTPS, anonymous or token auth — no IP addresses, no Windows credentials
 
 ## System.Web Replacement: MimeMapping
 
@@ -201,9 +213,25 @@ catch (Exception)
 }
 ```
 
-## ILMerge Considerations
+## Dependent Assemblies (ILMerge / Plug-in Packages)
 
-When a plugin references external assemblies (Newtonsoft.Json, helper libraries), they must be ILMerged into a single assembly for Sandbox registration.
+Anything the **compiled** plug-in DLL references at runtime beyond the .NET Framework and the CRM SDK has to be delivered with it:
+
+| Option | On-prem | Online | Custom workflow activities |
+|---|---|---|---|
+| Linked source files (`<Compile Include="..\Helper\X.cs"><Link>`) — code compiles into the assembly, nothing extra to deploy | ✅ | ✅ | ✅ |
+| ILMerge / ILRepack | works | **not supported by Microsoft** | — |
+| Plug-in package (dependent assemblies) | ❌ | ✅ | ❌ **not supported** |
+
+So for assemblies that contain workflow activities, the only supported online option is to have **no runtime dependency**: compile the needed code in via linked files, or remove the dependency. Check the real dependencies after the build — a `<Reference>` in the `.csproj` is only a dependency if the compiled DLL still references it:
+
+```powershell
+# Windows PowerShell 5.1
+$dll = Resolve-Path "bin\Release\MyPlugins.dll"
+[System.Reflection.Assembly]::ReflectionOnlyLoadFrom($dll).GetReferencedAssemblies() | Format-Table Name, Version
+```
+
+Existing ILMerge setups (on-prem, during the transition):
 
 **Post-ILMerge checklist**:
 - Verify merged assembly is under 16 MB size limit
@@ -212,7 +240,7 @@ When a plugin references external assemblies (Newtonsoft.Json, helper libraries)
 - Sign the merged assembly if required by CRM registration
 - `Assembly.GetExecutingAssembly().GetType("...")` may need namespace updates after merge
 
-**Common ILMerge issues**:
+**Common ILMerge issues** (on-prem):
 - Newtonsoft.Json ILMerged into plugin → all Newtonsoft calls are now Sandbox-scoped and blocked
 - Helper library with `System.Drawing` reference ILMerged → pulls in blocked GDI+ types
 - ILMerged assembly exceeds 16 MB → split into multiple plugin assemblies
@@ -326,3 +354,5 @@ Before starting migration:
 | `FileNotFoundException` on merged type | ILMerge changed type namespace | Update `GetType()` calls with new fully qualified name |
 | `Depth exceeded` | Plugin triggers another plugin 8+ levels | Redesign trigger chain, use pre/post images instead of re-queries |
 | `Socket connection refused` | Outbound call on non-80/443 port | Change endpoint to port 80 or 443 |
+| Timeout / name resolution failure **online only** | Endpoint is inside the company network, or URL uses an IP address | Publish the endpoint publicly (e.g. Azure API Management) under a DNS name — see `online-checklist.md` |
+| `Could not load file or assembly 'X'` online | Runtime dependency not delivered | Compile it in via linked files, or use a plug-in package (plug-ins only) |
