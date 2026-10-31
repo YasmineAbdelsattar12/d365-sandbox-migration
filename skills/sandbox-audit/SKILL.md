@@ -12,7 +12,9 @@ This skill ships a scanner script at `scripts/scan.ps1` inside this skill's base
 
 ## Step 1: Get the Project Path and Target
 
-**Target environment.** Ask once (AskUserQuestion, together with the project question if both are needed) unless the developer already said:
+Order: settle the **project path first** (plain chat), then ask **target + PDF report** together in one AskUserQuestion call.
+
+**Target environment.** Ask once (AskUserQuestion) unless the developer already said:
 - **Dataverse Online** (default — moving from on-prem to the cloud): run every check, including Step 7 Online Readiness against `references/online-checklist.md`
 - **On-premises, Sandbox only**: skip the online-only checks (framework rule, plug-in packages, internal endpoints become ⚠️ instead of ❌)
 
@@ -27,12 +29,13 @@ If nobody answers, use **Dataverse Online** and say so in the summary.
 
 Remember the answer for Step 9. If nobody answers, treat it as **No** for now (Step 9 asks again).
 
-**Project.** If the current working directory contains exactly one `.csproj`, use it and say so. Otherwise ask the developer:
+**Project.** If the developer already gave a path, or the current working directory contains exactly one `.csproj`, use it and say so. Otherwise ask **as a normal chat message — NOT with AskUserQuestion** — and wait for the reply:
 
-> What is the path to your D365 plugin or workflow activity project folder?
-> (The folder containing the `.csproj` file)
+> What is the path to the D365 plugin or workflow activity project you want to migrate? (The folder containing the `.csproj`, or the `.csproj` itself.)
 
-Use AskUserQuestion if available. Accept a folder path or a `.csproj` file path. If the developer gives a `.sln` path, find all `.csproj` files in the solution directory and ask which project(s) to migrate.
+You may suggest a few likely candidates in the same message (e.g. projects not yet migrated), but the developer answers by typing. **Never create an option named "Other" / "Other (type path)" in AskUserQuestion** — the tool adds its own free-text choice, and a hand-made "Other" is just a button with no text box, so the path never arrives.
+
+Accept a folder path or a `.csproj` file path. If the developer gives a `.sln` path, find all `.csproj` files in the solution directory and ask which project(s) to migrate (AskUserQuestion with the real project names as options is fine here).
 
 Confirm the path exists and contains a `.csproj` file before proceeding.
 
