@@ -19,6 +19,7 @@ Point it at your project → it scans every `.cs` file → fixes all violations 
 
 ## Changelog
 
+- **1.4.2** — Author set to Yasmine Abdelsattar
 - **1.4.1** — Ask for the project path as a plain chat question (a hand-made "Other" option in the question form had no text box)
 - **1.4.0** — Optional PDF migration report (`scripts/make-report.ps1`): asked at the start and again at the end, saved in the repo (`docs\sandbox-migration`) or Documents, with git diff since the run's starting commit, rendered to PDF via headless Edge/Chrome
 - **1.3.0** — Dataverse Online readiness: target environment choice; scanner traces every HTTP call's URL source and classifies hard-coded URLs (IP / internal / port / plain HTTP); detects plug-ins vs workflow activities, target framework, signing, assembly version, dependency candidates and calls inside loops; post-build DLL check (real dependencies, signature, version); new `online-checklist.md` (verified against Microsoft Learn and MC1515315); blocked-API list split into Blocked / Avoid and extended (IP URLs, Windows credentials, MemoryCache, `Settings.Default`); KeepAlive added to HTTP hardening; Newtonsoft and ILMerge guidance corrected
@@ -103,4 +104,4 @@ All Sandbox-blocked API categories:
 
 ## Author
 
-**LinkDev**
+**Yasmine Abdelsattar**

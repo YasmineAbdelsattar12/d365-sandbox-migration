@@ -3,7 +3,7 @@
   "name": "d365-sandbox-migration",
   "description": "Fully automated D365 CRM Sandbox migration plugin for Dynamics 365 CRM",
   "owner": {
-    "name": "LinkDev"
+    "name": "Yasmine Abdelsattar"
   },
   "plugins": [
     {
