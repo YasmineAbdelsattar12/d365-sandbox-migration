@@ -17,11 +17,6 @@
 
     Compatible with Windows PowerShell 5.1 and PowerShell 7+.
 
-.NOTES
-    Part of the D365 Sandbox Migration plugin.
-    Author and owner: Yasmine Abdelsattar - https://github.com/YasmineAbdelsattar12/d365-sandbox-migration
-    (c) 2026 Yasmine Abdelsattar. All rights reserved.
-
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File make-report.ps1 -Data "$env:TEMP\report-data.json" -Scan "$env:TEMP\sandbox-scan-X.json" -Repo "D:\Repo" -OutDir "D:\Repo\docs\sandbox-migration" -Open
 #>
@@ -327,12 +322,11 @@ pre span { display: block; } pre .a { background: #e6ffed; color: #0e5c2f; } pre
 pre.stat { background: #f8fafc; border: 1px solid #d9e2ec; border-radius: 1.5mm; margin-bottom: 3mm; }
 ul.check { list-style: none; padding-left: 1mm; } ul.check li::before { content: "\2610  "; color: #52606d; }
 .owner { color: #1d4e89; }
-.kicker .owner { text-transform: none; letter-spacing: 0; font-weight: 500; }
 .footer { margin-top: 10mm; padding-top: 2mm; border-top: 1px solid #d9e2ec; color: #7b8794; font-size: 8.5pt; }
 </style></head>
 <body>
 <div class="cover">
-  <div class="kicker">D365 Sandbox Migration Report <span class="owner">&middot; tool by $(E $ToolOwner)</span></div>
+  <div class="kicker">D365 Sandbox Migration Report</div>
   <h1>$(E $project)</h1>
   <div class="meta">Assembly $(E $d.Assembly) &nbsp;&middot;&nbsp; Target: $(E $d.Target) &nbsp;&middot;&nbsp; $(E $generated)$(if ($d.Author) { " &nbsp;&middot;&nbsp; Prepared by $(E $d.Author)" })</div>
   <div class="verdict">Build $(Badge $s.BuildResult $s.BuildResult) &nbsp; Online readiness $(Badge $s.OnlineVerdict $s.OnlineVerdictText)</div>
