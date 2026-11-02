@@ -28,6 +28,11 @@
 
     Compatible with Windows PowerShell 5.1 and PowerShell 7+.
 
+.NOTES
+    Part of the D365 Sandbox Migration plugin.
+    Author and owner: Yasmine Abdelsattar - https://github.com/YasmineAbdelsattar12/d365-sandbox-migration
+    (c) 2026 Yasmine Abdelsattar. All rights reserved.
+
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File scan.ps1 -Project "D:\Repo\Cs\My.Plugin" -SolutionRoot "D:\Repo" -OutFile "$env:TEMP\scan.json"
 .EXAMPLE

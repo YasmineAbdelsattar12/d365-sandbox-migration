@@ -15,6 +15,11 @@
     Use -InspectOnly -Dll <path> to inspect a DLL that was built some other way.
     Compatible with Windows PowerShell 5.1 and PowerShell 7+.
 
+.NOTES
+    Part of the D365 Sandbox Migration plugin.
+    Author and owner: Yasmine Abdelsattar - https://github.com/YasmineAbdelsattar12/d365-sandbox-migration
+    (c) 2026 Yasmine Abdelsattar. All rights reserved.
+
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1 -Project "D:\Repo\Cs\My.Plugin" -OutFile "$env:TEMP\build.json"
 .EXAMPLE
