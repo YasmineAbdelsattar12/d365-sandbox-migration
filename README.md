@@ -20,13 +20,15 @@ Built to work for **any team and any repository layout**: each team can describe
    ```
    Type the project path when asked (it suggests projects not yet migrated).
 
-## Three modes
+## Modes
 
 | Command | What happens | Changes code? |
 |---|---|---|
 | `/d365-sandbox-migration:sandbox-audit` | **Migrate** — scan, fix, build, verify, online readiness, summary, optional PDF | Yes |
 | `/d365-sandbox-migration:sandbox-audit report` | **Report only** — the same analysis and summary, listing what *would* change. Good for estimating effort or a review with the tech lead | No |
 | `/d365-sandbox-migration:sandbox-audit setup` | **Setup** — creates or updates `sandbox-audit.json` for the repository | No |
+| `/d365-sandbox-migration:sandbox-audit batch report D:\Repo\Crm\Cs` | **Batch report** — every project under the folder: effort, online estimate, shared files to decide first, recommended order, one combined PDF | No |
+| `/d365-sandbox-migration:sandbox-audit batch D:\Repo\Crm\Cs` | **Batch migrate** — the projects one after another (each in its own sub-agent), shared files decided once, one commit per project if you allow it, progress saved so it can resume, one combined report | Yes |
 
 You can also just say "migrate this project to sandbox", "audit my plugins for sandbox", "is this project ready for Dataverse Online?".
 
@@ -112,6 +114,7 @@ https://github.com/YasmineAbdelsattar12/d365-sandbox-migration
 
 ## Changelog
 
+- **1.8.0** — Batch mode for a whole folder (e.g. `Crm\Cs`): `batch-scan.ps1` scans every project (effort and online estimates, shared problem files, recommended order, skipped projects with reasons); **batch report** (no code changes, combined PDF) and **batch migrate** (shared files decided once, one sub-agent per project, optional commit per project, progress file with resume, decisions collected at the end, combined PDF with per-project results)
 - **1.7.3** — Report footer: "D365 Sandbox Migration tool created and owned by Yasmine Abdelsattar · © 2026. All rights reserved."
 - **1.7.2** — Report footer shows only the copyright line
 - **1.7.1** — Owner name shown once, in the PDF report footer

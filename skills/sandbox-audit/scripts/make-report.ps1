@@ -22,7 +22,9 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][string]$Data,
+    [string]$Data,                 # single project: report-data.json
+    [string]$BatchData,            # batch: JSON from batch-scan.ps1
+    [string]$BatchProgress,        # batch migrate: progress file with per-project results (see references/batch.md)
     [string]$Scan,
     [string]$Repo,
     [Parameter(Mandatory = $true)][string]$OutDir,
@@ -73,7 +75,21 @@ function List($items) {
 function Code([string]$s) { return "<code>$(E $s)</code>" }
 
 # ---------------------------------------------------------------- load inputs
-$d = Get-Content -LiteralPath $Data -Raw -Encoding UTF8 | ConvertFrom-Json
+if (-not $Data -and -not $BatchData) { throw 'Pass -Data (one project) or -BatchData (batch)' }
+$bd = $null; $bp = $null
+if ($BatchData) {
+    $bd = Get-Content -LiteralPath $BatchData -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($BatchProgress -and (Test-Path -LiteralPath $BatchProgress)) { $bp = Get-Content -LiteralPath $BatchProgress -Raw -Encoding UTF8 | ConvertFrom-Json }
+    $d = [pscustomobject]@{
+        Project = ('Batch - ' + (Split-Path -Leaf $bd.Folder)); Assembly = $null
+        Target = $(if ($bp -and $bp.Target) { $bp.Target } elseif ($bd.Settings -and $bd.Settings.Target -and $bd.Settings.Target -ne 'ask') { $bd.Settings.Target } else { '' })
+        Author = $(if ($bp) { $bp.Author } else { $null }); SkillVersion = $(if ($bp) { $bp.SkillVersion } else { $null })
+        Baseline = $(if ($bp -and $bp.BaseCommit) { "commit $($bp.BaseCommit)" } elseif ($bp -and $bp.Baseline) { $bp.Baseline } else { $null })
+        Summary = [pscustomobject]@{ BuildResult = ''; OnlineVerdict = ''; OnlineVerdictText = '' }
+    }
+} else {
+    $d = Get-Content -LiteralPath $Data -Raw -Encoding UTF8 | ConvertFrom-Json
+}
 $scanJson = $null
 if ($Scan -and (Test-Path -LiteralPath $Scan)) { $scanJson = Get-Content -LiteralPath $Scan -Raw -Encoding UTF8 | ConvertFrom-Json }
 $project = if ($d.Project) { $d.Project } elseif ($scanJson) { $scanJson.Project } else { 'Project' }
@@ -165,6 +181,99 @@ $baselineText = if ($d.Baseline) { [string]$d.Baseline } elseif ($d.BaseCommit) 
 $sec = New-Object System.Collections.Generic.List[string]
 $n = 0
 function Add-Section([string]$title, [string]$body) { $script:n++; $script:sec.Add("<section><h2><span class=""num"">$($script:n)</span>$(E $title)</h2>$body</section>") }
+
+if ($bd) {
+    # ================================================================ batch report
+    $c = $bd.Counts
+    $res = @{}
+    if ($bp) { foreach ($pr in (Arr $bp.Projects)) { $res[$pr.Name] = $pr } }
+    $resultBadge = {
+        param($st)
+        switch -regex ([string]$st) {
+            '^migrated$'          { Badge 'ok' 'Migrated' }
+            '^needs-work$'        { Badge 'warn' 'Needs work' }
+            '^(build-failed|error)$' { Badge 'fail' $(if ($st -eq 'error') { 'Error' } else { 'Build failed' }) }
+            '^stopped$'           { Badge 'warn' 'Stopped' }
+            default               { "<span class=""badge info"">$(E $(if ($st) { $st } else { 'Not run' }))</span>" }
+        }
+    }
+    $kv = New-Object System.Collections.Generic.List[object]
+    $kv.Add(@('Folder', (Code $bd.Folder)))
+    $kv.Add(@('Mode', $(if ($bp) { 'Batch migrate' } else { 'Batch report only - no code was changed' })))
+    if ($d.Target) { $kv.Add(@('Target environment', (E $d.Target))) }
+    $kv.Add(@('Projects found', (E ("{0} ({1} in this batch, {2} skipped, {3} errors)" -f $c.Projects, $c.InBatch, $c.Skipped, $c.Errors))))
+    $kv.Add(@('Estimated effort', (E ("{0} low, {1} medium, {2} high" -f $c.Low, $c.Medium, $c.High))))
+    $kv.Add(@('Online readiness (estimate)', ((Badge 'ok' "$($c.OnlineOk) ready") + ' ' + (Badge 'warn' "$($c.OnlineWarn) needs work") + ' ' + (Badge 'fail' "$($c.OnlineFail) blocked"))))
+    $kv.Add(@('Shared files to decide first', (E $c.SharedProblemFiles)))
+    if ($bp) {
+        $st = @(Arr $bp.Projects)
+        $kv.Add(@('Migration results', ((Badge 'ok' "$(@($st | Where-Object { $_.Status -eq 'migrated' }).Count) migrated") + ' ' + (Badge 'warn' "$(@($st | Where-Object { $_.Status -eq 'needs-work' }).Count) needs work") + ' ' + (Badge 'fail' "$(@($st | Where-Object { $_.Status -eq 'build-failed' -or $_.Status -eq 'error' }).Count) failed") + ' ' + "<span class=""badge info"">$(@($st | Where-Object { -not $_.Status -or $_.Status -eq 'pending' }).Count) not run</span>")))
+        if ($bp.Branch) { $kv.Add(@('Branch', (Code $bp.Branch))) }
+        if ($d.Baseline) { $kv.Add(@('Baseline', (E $d.Baseline))) }
+    }
+    $sumHtml = '<table class="kv"><tbody>' + (($kv | ForEach-Object { "<tr><th>$($_[0])</th><td>$($_[1])</td></tr>" }) -join '') + '</tbody></table>'
+    $sumHtml += '<p class="muted small">Effort and online readiness are estimates from the scanner (raw findings, before each project is analysed). Each migrated project is verified individually - see its result.</p>'
+    Add-Section 'Overview' $sumHtml
+
+    $orderIdx = @{}; $k = 0; foreach ($nm in (Arr $bd.RecommendedOrder)) { $k++; $orderIdx[$nm] = $k }
+    $inBatch = @(Arr $bd.Projects | Where-Object { $_.Status -eq 'scanned' } | Sort-Object @{ Expression = { if ($orderIdx.ContainsKey($_.Name)) { $orderIdx[$_.Name] } else { 999 } } })
+    $effortBadge = @{ Low = 'ok'; Medium = 'warn'; High = 'fail' }
+    $rows = foreach ($r in $inBatch) {
+        $cells = @((E $orderIdx[$r.Name]), ((Code $r.Name) + "<div class=""muted small"">$(E $r.Kind) &middot; $(E $r.Framework)</div>"), (E ("{0} ({1} linked)" -f $r.Files, $r.Linked)), (E ("{0} / {1} / {2}" -f $r.Blocked, $r.Avoid, $r.Review)), (E $r.HttpCalls), (Badge $effortBadge[[string]$r.Effort] $r.Effort), (Badge $r.OnlineEstimate))
+        if ($bp) {
+            $x = $res[$r.Name]
+            $cells += $(if ($x) { (& $resultBadge $x.Status) + $(if ($x.Commit) { "<div class=""muted small"">$(E $x.Commit)</div>" } else { '' }) } else { & $resultBadge $null })
+        }
+        , $cells
+    }
+    $hdr = @('#', 'Project', 'Files', 'Blocked / Avoid / Review', 'HTTP', 'Effort', 'Online')
+    if ($bp) { $hdr += 'Result' }
+    Add-Section 'Projects (recommended order)' ('<p class="muted small">Easy projects first; projects with more shared-file findings later, after the shared decisions.</p>' + (Table $hdr $rows))
+
+    if (Has $bd.SharedProblems) {
+        $dec = @{}
+        if ($bp) { foreach ($sd in (Arr $bp.SharedDecisions)) { $dec[[string]$sd.File] = $sd } }
+        $rows = foreach ($sp in (Arr $bd.SharedProblems)) {
+            $x = $dec[[string]$sp.File]
+            , @((Code $sp.RelativePath), (E ((Arr $sp.Apis) -join ', ')), (E ("{0}: {1}" -f $sp.ProjectCount, ((Arr $sp.Projects) -join ', '))), $(if ($x) { E ("$($x.Decision) - $($x.Reason)") } else { '<span class="muted">to decide</span>' }))
+        }
+        Add-Section 'Shared files to decide first' ('<p class="muted small">Blocked APIs in files that several projects compile. They are decided once, before the projects, so every project gets the same answer.</p>' + (Table @('File', 'Blocked APIs', 'Used by (projects in this batch)', 'Decision') $rows))
+    }
+
+    $onl = @($inBatch | Where-Object { $_.OnlineEstimate -ne 'ok' })
+    if ($onl.Count) {
+        $rows = foreach ($r in $onl) { , @((Code $r.Name), (Badge $r.OnlineEstimate), ('<ul>' + ((Arr $r.OnlineWhy | ForEach-Object { "<li>$(E $_)</li>" }) -join '') + ((Arr $r.UrlProblems | ForEach-Object { "<li>$(Code $_)</li>" }) -join '') + '</ul>')) }
+        Add-Section 'Dataverse Online - what to look at' (Table @('Project', 'Estimate', 'Why') $rows)
+    }
+
+    if ($bp) {
+        $done = @(Arr $bp.Projects | Where-Object { $_.Status -and $_.Status -ne 'pending' })
+        if ($done.Count) {
+            $body = ''
+            foreach ($x in $done) {
+                $body += "<h3>$(E $x.Name) $(& $resultBadge $x.Status)</h3><table class=""kv""><tbody>"
+                if ($x.Commit) { $body += "<tr><th>Commit</th><td>$(Code $x.Commit)</td></tr>" }
+                if ($x.FilesModified -ne $null) { $body += "<tr><th>Files modified</th><td>$(E $x.FilesModified)</td></tr>" }
+                if ($x.Build) { $body += "<tr><th>Build</th><td>$(E $x.Build)</td></tr>" }
+                if ($x.OnlineVerdict) { $body += "<tr><th>Online readiness</th><td>$(Badge $x.OnlineVerdict $x.OnlineVerdictText)</td></tr>" }
+                if ($x.Report) { $body += "<tr><th>Project report</th><td>$(Code $x.Report)</td></tr>" }
+                if ($x.Notes) { $body += "<tr><th>Notes</th><td>$(E $x.Notes)</td></tr>" }
+                $body += '</tbody></table>'
+                if (Has $x.Changes) { $body += '<div class="small"><strong>Changes</strong>' + (List $x.Changes) + '</div>' }
+                if (Has $x.NeedsVerification) { $body += '<div class="small"><strong>Needs verification</strong>' + (List $x.NeedsVerification) + '</div>' }
+                if (Has $x.NeedsDecision) { $body += '<div class="small"><strong>Needs decision</strong>' + (List $x.NeedsDecision) + '</div>' }
+            }
+            Add-Section 'Results per project' $body
+        }
+        if (Has $bp.Decisions) { Add-Section 'Decisions for the team' (List $bp.Decisions) }
+    }
+
+    $sk = @(Arr $bd.Projects | Where-Object { $_.Status -ne 'scanned' })
+    if ($sk.Count) {
+        $rows = foreach ($r in $sk) { , @((Code $r.Name), (E $(if ($r.Error) { 'Error: ' + $r.Error } else { $r.SkipReason }))) }
+        Add-Section 'Skipped projects' (Table @('Project', 'Reason') $rows)
+    }
+} else {
 
 # 1. Summary
 $kv = @(
@@ -282,6 +391,8 @@ if ($scanJson -and (Has $scanJson.Hits)) {
     Add-Section 'Appendix - scanner findings' ('<p class="muted small">Raw pattern hits before analysis. Not every hit is a violation - see sections above for what was fixed and why.</p>' + (Table @('Location', 'Severity', 'Category', 'API', 'Method') $rows))
 }
 
+}   # end single-project sections
+
 # ---------------------------------------------------------------- page
 $verdictInfo = Get-StatusInfo $s.OnlineVerdict
 $generated = Get-Date -Format 'dd MMM yyyy, HH:mm'
@@ -308,7 +419,7 @@ thead th { background: #f0f4f8; color: #243b53; font-weight: 600; }
 tr { break-inside: avoid; }
 table.kv th { width: 34%; background: #f8fafc; font-weight: 600; }
 td ul { margin: 0; padding-left: 4.5mm; }
-code { font-family: Consolas, "Cascadia Mono", Menlo, monospace; font-size: 8.8pt; background: #f0f4f8; padding: 0 1mm; border-radius: 1mm; word-break: break-all; }
+code { font-family: Consolas, "Cascadia Mono", Menlo, monospace; font-size: 8.8pt; background: #f0f4f8; padding: 0 1mm; border-radius: 1mm; word-break: normal; overflow-wrap: anywhere; }
 .badge { display: inline-block; padding: .3mm 2mm; border-radius: 3mm; font-size: 8.5pt; font-weight: 600; white-space: nowrap; }
 .badge.ok { background: #e3f9e5; color: #0e5c2f; border: 1px solid #a3d9a5; }
 .badge.warn { background: #fff8e1; color: #8a5a00; border: 1px solid #f0d58c; }
@@ -326,13 +437,14 @@ ul.check { list-style: none; padding-left: 1mm; } ul.check li::before { content:
 </style></head>
 <body>
 <div class="cover">
-  <div class="kicker">D365 Sandbox Migration Report</div>
+  <div class="kicker">D365 Sandbox Migration Report$(if ($bd) { ' &middot; Batch' })</div>
   <h1>$(E $project)</h1>
-  <div class="meta">Assembly $(E $d.Assembly) &nbsp;&middot;&nbsp; Target: $(E $d.Target) &nbsp;&middot;&nbsp; $(E $generated)$(if ($d.Author) { " &nbsp;&middot;&nbsp; Prepared by $(E $d.Author)" })</div>
-  <div class="verdict">Build $(Badge $s.BuildResult $s.BuildResult) &nbsp; Online readiness $(Badge $s.OnlineVerdict $s.OnlineVerdictText)</div>
+$(if ($bd) { "  <div class=""meta"">$(E $bd.Folder) &nbsp;&middot;&nbsp; $(if ($d.Target) { "Target: $(E $d.Target) &nbsp;&middot;&nbsp; " })$(E $generated)$(if ($d.Author) { " &nbsp;&middot;&nbsp; Prepared by $(E $d.Author)" })</div>
+  <div class=""verdict"">$(E $bd.Counts.InBatch) projects in this batch &nbsp; $(Badge 'ok' "$($bd.Counts.OnlineOk) ready") $(Badge 'warn' "$($bd.Counts.OnlineWarn) needs work") $(Badge 'fail' "$($bd.Counts.OnlineFail) blocked")</div>" } else { "  <div class=""meta"">Assembly $(E $d.Assembly) &nbsp;&middot;&nbsp; Target: $(E $d.Target) &nbsp;&middot;&nbsp; $(E $generated)$(if ($d.Author) { " &nbsp;&middot;&nbsp; Prepared by $(E $d.Author)" })</div>
+  <div class=""verdict"">Build $(Badge $s.BuildResult $s.BuildResult) &nbsp; Online readiness $(Badge $s.OnlineVerdict $s.OnlineVerdictText)</div>" })
 </div>
 $($sec -join "`n")
-<div class="footer">Generated by the d365-sandbox-migration plugin$(if ($d.SkillVersion) { " v$(E $d.SkillVersion)" }) on $(E $generated). Code changes are shown against $(E $baselineText).<br>
+<div class="footer">Generated by the d365-sandbox-migration plugin$(if ($d.SkillVersion) { " v$(E $d.SkillVersion)" }) on $(E $generated). $(if (-not $bd) { "Code changes are shown against $(E $baselineText)." })<br>
 <span class="owner">$(E $ToolName) tool created and owned by <strong>$(E $ToolOwner)</strong> &middot; &copy; $(E $ToolYear). All rights reserved.</span></div>
 </body></html>
 "@

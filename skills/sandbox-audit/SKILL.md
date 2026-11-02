@@ -1,6 +1,6 @@
 ---
 name: "sandbox-audit"
-description: "Fully automated Dynamics 365 CRM Sandbox migration tool for any team or project, including Dataverse Online readiness. Scans all C# files in a plugin/workflow project (including linked and shared-project files), fixes every Sandbox violation in-place, removes blocked references, builds in Release, checks online readiness (endpoints, .NET version, dependencies, signing, version) and produces a summary and optional PDF report. Supports per-repo team settings (sandbox-audit.json), a setup mode, a read-only report mode, git and TFVC. Triggers on: 'sandbox migration', 'audit for sandbox', 'sandbox violation', 'partial trust', 'isolation mode', 'none to sandbox', 'full trust to sandbox', 'plugin sandbox', 'migrate to sandbox', 'migrate plugins to online', 'dataverse online readiness', 'on-prem to online', 'sandbox audit setup'."
+description: "Fully automated Dynamics 365 CRM Sandbox migration tool for any team or project, including Dataverse Online readiness. Scans all C# files in a plugin/workflow project (including linked and shared-project files), fixes every Sandbox violation in-place, removes blocked references, builds in Release, checks online readiness (endpoints, .NET version, dependencies, signing, version) and produces a summary and optional PDF report. Supports per-repo team settings (sandbox-audit.json), a setup mode, a read-only report mode, git and TFVC. Triggers on: 'sandbox migration', 'audit for sandbox', 'sandbox violation', 'partial trust', 'isolation mode', 'none to sandbox', 'full trust to sandbox', 'plugin sandbox', 'migrate to sandbox', 'migrate plugins to online', 'dataverse online readiness', 'on-prem to online', 'sandbox audit setup', 'migrate all plugins in a folder', 'batch sandbox migration'."
 ---
 
 # D365 Sandbox Migration — Automated Fix Tool
@@ -14,7 +14,8 @@ Scripts in this skill's base directory (the "Base directory for this skill" path
 |---|---|
 | `scripts/scan.ps1` | Resolve every compiled file, find blocked APIs, online-readiness data, team settings, version control. `-ListProjects` lists the whole repo |
 | `scripts/build.ps1` | Find MSBuild on any machine (vswhere), restore, rebuild, list errors, inspect the DLL |
-| `scripts/make-report.ps1` | HTML + PDF report with the code diff |
+| `scripts/make-report.ps1` | HTML + PDF report with the code diff (`-BatchData` for a batch) |
+| `scripts/batch-scan.ps1` | Scan every project under a folder: effort and online estimates, shared problem files, recommended order |
 
 Run them with Windows PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File "<skill base dir>\scripts\<script>.ps1" ...` (use `pwsh` if only PowerShell 7 is installed).
 
@@ -24,11 +25,13 @@ Read the text the skill was invoked with:
 
 | Invocation contains | Mode |
 |---|---|
+| `batch` + a folder (with `report`) | **Batch report** — follow `references/batch.md`. Every project under the folder, one combined report; changes no code |
+| `batch` + a folder (otherwise) | **Batch migrate** — follow `references/batch.md`. Projects migrated one at a time, each in its own sub-agent, with progress / resume |
 | `setup`, `configure`, `init` | **Setup mode** — follow `references/modes.md` → Setup Mode. Writes `sandbox-audit.json`; changes no code |
 | `report`, `audit only`, `dry run`, `read-only`, `assess` | **Report-only mode** — follow `references/modes.md` → Report-Only Mode. Analyses and reports; changes no code |
 | anything else (or nothing) | **Migrate mode** — Steps 1–9 below |
 
-A project path in the invocation text is used as the project.
+Check `batch` first (so `batch report` is not taken for single-project report mode). A project path in the invocation text is used as the project. If the developer gives a folder that contains several `.csproj` files without saying `batch`, ask whether they mean batch mode.
 
 ## Step 1: Project, Target and Report
 
