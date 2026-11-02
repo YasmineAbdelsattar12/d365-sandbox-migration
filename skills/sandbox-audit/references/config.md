@@ -2,6 +2,8 @@
 
 One optional file per repository that tells the skill how **this team** works. Commit it, so every developer gets the same behaviour. Without it, the skill uses the defaults below and detects what it can.
 
+**Format**: plain JSON — no comments (use `notes` instead), double-quoted names and strings.
+
 **Where**: the repository root (or any folder above the project — the scanner looks in the project folder and every parent folder up to the solution root). Paths inside the file are relative to the file's folder. Create it with **setup mode** (`/d365-sandbox-migration:sandbox-audit setup`) or copy one of the files in the plugin's `examples/` folder.
 
 ## All settings
@@ -25,7 +27,7 @@ One optional file per repository that tells the skill how **this team** works. C
 | `skipProjects` | list of project-name patterns (`*` wildcard) | — | Projects that are never migrated or suggested (API, Portal, tests) |
 | `http.timeoutSeconds` | 1–110 | `90` | Timeout set on outbound HTTP calls (the platform stops a plug-in at 120 s) |
 | `acceptedFindings` | list (below) | — | Findings the team reviewed and accepted — they are reported as **Accepted**, not fixed |
-| `notes` | any text | — | Free text for the team (ignored by the skill) |
+| `notes` | text or list of texts | — | Free text for the team (ignored by the skill). Use it for explanations — JSON does not allow `//` comments |
 
 ### `acceptedFindings` entries
 

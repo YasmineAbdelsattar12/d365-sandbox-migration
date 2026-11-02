@@ -110,6 +110,7 @@ https://github.com/YasmineAbdelsattar12/d365-sandbox-migration
 
 ## Changelog
 
+- **1.6.2** — Setup writes plain JSON without comments (explanations go into `notes`), so Windows PowerShell 5.1 can read the settings file
 - **1.6.1** — Owner shown on every PDF report (cover and footer) and in every script header
 - **1.6.0** — For any team and project: per-repo settings file `sandbox-audit.json` (target, report, serializer strategy incl. the team's own class, shared helper folder, projects to skip, HTTP timeout, accepted findings) with validation; inline `// sandbox-ignore: reason`; **setup mode** (`-ListProjects` overview of the whole repo) and **report-only mode**; TFVC support (safety check, `tf diff` in the PDF); `build.ps1` finds MSBuild via vswhere, restores packages and inspects the DLL; project suggestions come from a real project scan; neutral examples; skill instructions split into reference files
 - **1.5.1** — AppSerializer serializes the object's runtime type (`obj.GetType()`), like JavaScriptSerializer and Newtonsoft
