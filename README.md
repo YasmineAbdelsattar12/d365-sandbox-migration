@@ -19,6 +19,7 @@ Point it at your project → it scans every `.cs` file → fixes all violations 
 
 ## Changelog
 
+- **1.5.1** — AppSerializer serializes the object's runtime type (`obj.GetType()`), like JavaScriptSerializer and Newtonsoft, so derived classes and values typed as `object` serialize fully
 - **1.5.0** — AppSerializer gets `JsonDateStyle`: `MsAjax` keeps `JavaScriptSerializer`'s `\/Date(...)\/` dates and `"null"` output, ISO stays the default for Newtonsoft replacements (tested in .NET); scanner judges every existing `AppSerializer` in the solution (reusable / upgrade / not reusable, with reasons such as instance + `IJsonSerializer` design in its own DLL) and never modifies non-reusable ones; new "Serializer decisions" section in the summary and PDF report
 - **1.4.2** — Author set to Yasmine Abdelsattar
 - **1.4.1** — Ask for the project path as a plain chat question (a hand-made "Other" option in the question form had no text box)

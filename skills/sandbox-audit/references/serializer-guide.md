@@ -141,7 +141,8 @@ namespace <Shared.Helper.Namespace>
         public static string Serialize<T>(T obj, JsonDateStyle dates)
         {
             if (obj == null) return dates == JsonDateStyle.MsAjax ? "null" : null;
-            var serializer = new DataContractJsonSerializer(typeof(T), CreateSettings(dates));
+            // Runtime type, like JavaScriptSerializer and Newtonsoft (a derived class or a value typed as object serializes fully)
+            var serializer = new DataContractJsonSerializer(obj.GetType(), CreateSettings(dates));
             using (var ms = new MemoryStream())
             {
                 serializer.WriteObject(ms, obj);
@@ -166,6 +167,8 @@ namespace <Shared.Helper.Namespace>
     }
 }
 ```
+
+Differences from a hand-written `DataContractJsonSerializer` wrapper (e.g. an instance-style `AppSerializer : IJsonSerializer`): `UseSimpleDictionaryFormat = true` writes dictionaries as `{"key":"value"}` like `JavaScriptSerializer` (without it they become `[{"Key":..,"Value":..}]`), and `Deserialize` returns `default(T)` for `null` / empty / `"null"` input instead of throwing.
 
 **If the solution already has an `AppSerializer`** that the scanner marks `Upgrade` (old `...fffZ` format, or no `JsonDateStyle`): replace its whole content with the version above, keeping its namespace. The public API is unchanged (`Serialize<T>(T)` / `Deserialize<T>(string)` still exist), so existing callers keep compiling and behave the same; only the new overloads are added. The old `...fffZ` format wrote local times with a `Z` suffix (wrong by the UTC offset) and threw on dates without exactly 3 fractional digits.
 
