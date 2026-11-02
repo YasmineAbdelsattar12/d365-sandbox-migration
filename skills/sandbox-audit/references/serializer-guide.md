@@ -86,54 +86,88 @@ Use this helper throughout the codebase to replace all `JsonConvert` / `JavaScri
 
 **Namespace**: use the namespace of the folder it lives in (e.g. the shared helper library's root namespace), and add the matching `using` to every file that calls it.
 
+**Two date styles** (`JsonDateStyle`), so the JSON on the wire stays the same as before the migration:
+
+| Call | Dates written as | `null` object | Use when replacing |
+|---|---|---|---|
+| `AppSerializer.Serialize(x)` / `Deserialize<T>(json)` | ISO 8601 `"2026-11-02T08:00:00Z"` | `null` | Newtonsoft (`JsonConvert`) |
+| `AppSerializer.Serialize(x, JsonDateStyle.MsAjax)` / `Deserialize<T>(json, JsonDateStyle.MsAjax)` | `"\/Date(1793606400000)\/"` | `"null"` | `JavaScriptSerializer` |
+
+Tested output: a UTC `DateTime` in `MsAjax` style is byte-for-byte what `JavaScriptSerializer` wrote. A **local** `DateTime` gets the same timestamp plus an offset suffix (`"\/Date(1793606400000+0200)\/"`) — `DataContractJsonSerializer` reads it back correctly (tested), and Newtonsoft and `JavaScriptSerializer` parse the offset suffix too. If a serialized class has **local** `DateTime` members and the receiver is not .NET, list it under "Needs verification". `MsAjax` deserialization accepts both the plain and the suffixed form.
+
 ```csharp
+using System;
 using System.IO;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 using System.Text;
 
-internal static class AppSerializer
+namespace <Shared.Helper.Namespace>
 {
-    private static readonly Encoding Utf8NoBom = new UTF8Encoding(false);
-
-    // ISO 8601. 'FFFFFFF' = optional fractional seconds; 'K' = "Z" for UTC,
-    // "+03:00" for local, nothing for Unspecified. Accepts all of:
-    // 2026-10-29T10:00:00Z, 2026-10-29T10:00:00.123Z, 2026-10-29T10:00:00+02:00, 2026-10-29T10:00:00
-    private const string IsoDateFormat = "yyyy-MM-dd'T'HH:mm:ss.FFFFFFFK";
-
-    private static DataContractJsonSerializerSettings CreateSettings()
+    /// <summary>How DateTime values are written and read.</summary>
+    internal enum JsonDateStyle
     {
-        return new DataContractJsonSerializerSettings
-        {
-            UseSimpleDictionaryFormat = true,
-            DateTimeFormat = new DateTimeFormat(IsoDateFormat)
-        };
+        /// <summary>ISO 8601, e.g. "2026-11-02T10:00:00Z". Same as Newtonsoft.Json defaults.</summary>
+        Iso8601 = 0,
+
+        /// <summary>Microsoft AJAX format, e.g. "\/Date(1793613600000)\/". Same as JavaScriptSerializer.
+        /// Also returns "null" (not null) for a null object, like JavaScriptSerializer.</summary>
+        MsAjax = 1
     }
 
-    public static string Serialize<T>(T obj)
+    /// <summary>Sandbox-safe JSON helper (DataContractJsonSerializer).</summary>
+    internal static class AppSerializer
     {
-        if (obj == null) return null;
-        var serializer = new DataContractJsonSerializer(typeof(T), CreateSettings());
-        using (var ms = new MemoryStream())
+        private static readonly Encoding Utf8NoBom = new UTF8Encoding(false);
+
+        // 'FFFFFFF' = optional fractional seconds; 'K' = "Z" for UTC, "+03:00" for local, nothing for Unspecified.
+        private const string IsoDateFormat = "yyyy-MM-dd'T'HH:mm:ss.FFFFFFFK";
+
+        private static DataContractJsonSerializerSettings CreateSettings(JsonDateStyle dates)
         {
-            serializer.WriteObject(ms, obj);
-            return Utf8NoBom.GetString(ms.ToArray());
+            var settings = new DataContractJsonSerializerSettings { UseSimpleDictionaryFormat = true };
+            if (dates == JsonDateStyle.Iso8601)
+            {
+                settings.DateTimeFormat = new DateTimeFormat(IsoDateFormat);
+            }
+            return settings;
         }
-    }
 
-    public static T Deserialize<T>(string json)
-    {
-        if (string.IsNullOrEmpty(json)) return default(T);
-        var serializer = new DataContractJsonSerializer(typeof(T), CreateSettings());
-        using (var ms = new MemoryStream(Utf8NoBom.GetBytes(json)))
+        public static string Serialize<T>(T obj)
         {
-            return (T)serializer.ReadObject(ms);
+            return Serialize(obj, JsonDateStyle.Iso8601);
+        }
+
+        public static string Serialize<T>(T obj, JsonDateStyle dates)
+        {
+            if (obj == null) return dates == JsonDateStyle.MsAjax ? "null" : null;
+            var serializer = new DataContractJsonSerializer(typeof(T), CreateSettings(dates));
+            using (var ms = new MemoryStream())
+            {
+                serializer.WriteObject(ms, obj);
+                return Utf8NoBom.GetString(ms.ToArray());
+            }
+        }
+
+        public static T Deserialize<T>(string json)
+        {
+            return Deserialize<T>(json, JsonDateStyle.Iso8601);
+        }
+
+        public static T Deserialize<T>(string json, JsonDateStyle dates)
+        {
+            if (string.IsNullOrEmpty(json) || json == "null") return default(T);
+            var serializer = new DataContractJsonSerializer(typeof(T), CreateSettings(dates));
+            using (var ms = new MemoryStream(Utf8NoBom.GetBytes(json)))
+            {
+                return (T)serializer.ReadObject(ms);
+            }
         }
     }
 }
 ```
 
-**If the project already has an `AppSerializer`** using the old format `"yyyy-MM-dd'T'HH:mm:ss.fffZ"`: update it to the format above. The old format writes local times with a `Z` suffix (wrong by the UTC offset, e.g. 3 hours in Cairo) and throws `SerializationException` on dates without exactly 3 fractional digits.
+**If the solution already has an `AppSerializer`** that the scanner marks `Upgrade` (old `...fffZ` format, or no `JsonDateStyle`): replace its whole content with the version above, keeping its namespace. The public API is unchanged (`Serialize<T>(T)` / `Deserialize<T>(string)` still exist), so existing callers keep compiling and behave the same; only the new overloads are added. The old `...fffZ` format wrote local times with a `Z` suffix (wrong by the UTC offset) and threw on dates without exactly 3 fractional digits.
 
 ## Replacing JavaScriptSerializer
 
@@ -144,10 +178,12 @@ var serializer = new JavaScriptSerializer();
 string json = serializer.Serialize(myObject);
 var obj = serializer.Deserialize<MyType>(json);
 
-// AFTER
-string json = AppSerializer.Serialize(myObject);
-var obj = AppSerializer.Deserialize<MyType>(json);
+// AFTER — MsAjax keeps JavaScriptSerializer's \/Date(...)\/ dates and "null" output
+string json = AppSerializer.Serialize(myObject, JsonDateStyle.MsAjax);
+var obj = AppSerializer.Deserialize<MyType>(json, JsonDateStyle.MsAjax);
 ```
+
+Also different from `JavaScriptSerializer` (both styles): property names are case-sensitive when deserializing (see above), and members are written in alphabetical order unless `[DataMember(Order = n)]` is set — JSON receivers normally don't care about order.
 
 ## Replacing Newtonsoft.Json
 
@@ -197,15 +233,16 @@ string name = response.Contact.Name;
 
 ## DateTime Handling
 
-`DataContractJsonSerializer` defaults to `/Date(1234567890000)/` format. The `AppSerializer` helper sets ISO 8601 (`yyyy-MM-dd'T'HH:mm:ss.FFFFFFFK`) instead.
+`DataContractJsonSerializer` defaults to `\/Date(1234567890000)\/` format. `AppSerializer` uses ISO 8601 (`yyyy-MM-dd'T'HH:mm:ss.FFFFFFFK`) by default, and the `\/Date(...)\/` format with `JsonDateStyle.MsAjax`.
 
 **The original serializer decides what the wire format was — keep it the same:**
 
 | Original serializer | Its DateTime format | What to do |
 |---|---|---|
-| Newtonsoft (default) | ISO 8601 | `AppSerializer` as-is — output matches |
-| `JavaScriptSerializer` | `"\/Date(1730196000000)\/"` | **The format changes.** If the class being serialized contains any `DateTime` / `DateTime?` member, the receiving API may reject or misread ISO dates. Use a separate serializer instance **without** `DateTimeFormat` for that call (default `/Date(...)/` output), or confirm the receiver accepts ISO 8601. Either way, list it under **"Needs verification"** in the summary. If the class has no DateTime members, nothing changes. |
-| External API sends `/Date(...)/` | — | Deserialize with a serializer **without** `DateTimeFormat` |
+| Newtonsoft (default) | ISO 8601 | `AppSerializer.Serialize(x)` — output matches |
+| `JavaScriptSerializer` | `"\/Date(1730196000000)\/"` | `AppSerializer.Serialize(x, JsonDateStyle.MsAjax)` — output matches (see the local-time note above). **Never** switch a JavaScriptSerializer call to the ISO default: the receiving API may reject or misread ISO dates |
+| External API sends `\/Date(...)\/` | — | `AppSerializer.Deserialize<T>(json, JsonDateStyle.MsAjax)` |
+| External API sends ISO dates | — | `AppSerializer.Deserialize<T>(json)` |
 
 Never use a format ending in a literal `Z` (e.g. `"...ss.fffZ"`): `Z` is not a .NET format specifier, so it is written as a plain letter and a local time gets labelled as UTC.
 
@@ -357,7 +394,8 @@ public partial class CustomerDto
 |---|---|---|
 | `not serializable in partial trust because it is not public` | DTO class is `internal` | Change to `public class` |
 | Property silently missing from JSON | `[DataContract]` on class but `[DataMember]` missing on property | Add `[DataMember]` to every property that should serialize |
-| `DateTime` shows as `/Date(...)` | Default format, not ISO 8601 | Add `DateTimeFormat` to settings |
+| `DateTime` shows as `\/Date(...)\/` but ISO was expected | `JsonDateStyle.MsAjax` used for a Newtonsoft replacement | Use the default `AppSerializer.Serialize(x)` |
+| Receiving API rejects dates after replacing `JavaScriptSerializer` | ISO default used instead of `JsonDateStyle.MsAjax` | Use `AppSerializer.Serialize(x, JsonDateStyle.MsAjax)` |
 | Property is `null` after deserialize, no error | JSON name casing differs from `[DataMember(Name)]` | Set `Name` to the exact JSON casing (see "Property Names Are Case-Sensitive") |
 | `SerializationException` parsing a date | Fixed format like `.fff` and the JSON has no / different fractional seconds | Use `FFFFFFFK` format from the `AppSerializer` helper |
 | Time off by the UTC offset | Format ends in literal `Z` | Use `K` instead of `Z` |

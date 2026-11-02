@@ -61,7 +61,7 @@ Confirm the path exists and contains a `.csproj` file before proceeding.
    | `UnresolvedIncludes` | `<Compile Include>` values with MSBuild properties the script could not expand — resolve these manually |
    | `LocalCsNotCompiled` | `.cs` files in the folder that are NOT in the `.csproj` — not compiled, ignore them |
    | `References`, `PackagesConfig`, `PackageReferences`, `ProjectReferences` | Inputs for Step 5 |
-   | `ExistingAppSerializers[]` | `Path`, `Namespace`, `Visibility`, `OldDateFormat`, `LinkedBy` — input for "Placing AppSerializer" |
+   | `ExistingAppSerializers[]` | Every `class AppSerializer` in the solution: `Path`, `Namespace`, `Visibility`, `CompiledIntoThisProject`, `OwnedBy` (project whose own DLL it is part of), `LinkedBy`, `Reusable`, `Upgrade`, `Reasons[]` — input for "Placing AppSerializer" |
    | `ProjectStyle` | `legacy` (old-style `.csproj` / `packages.config`) or `sdk` |
    | `OnlineReadiness.TargetFramework` / `.Signing` / `.AssemblyVersion` | `Status` + `Note` for each — input for Step 7 |
    | `OnlineReadiness.EntryPoints` | Plug-in and workflow-activity classes (resolved through custom base classes). `ContainsWorkflowActivities` decides whether plug-in packages are possible |
@@ -166,29 +166,33 @@ Normally replace `.Result` / `.Wait()` on tasks with `.GetAwaiter().GetResult()`
 
 When a file uses `Newtonsoft.Json` or `JavaScriptSerializer`:
 
-1. Replace `JsonConvert.SerializeObject/DeserializeObject` and `JavaScriptSerializer.Serialize/Deserialize` → `AppSerializer.Serialize/Deserialize`
+1. Replace, keeping the wire format identical (see `references/serializer-guide.md` → "Two date styles"):
+   - `JsonConvert.SerializeObject(x)` / `DeserializeObject<T>(json)` → `AppSerializer.Serialize(x)` / `AppSerializer.Deserialize<T>(json)` (ISO dates, like Newtonsoft)
+   - `JavaScriptSerializer.Serialize(x)` / `Deserialize<T>(json)` → `AppSerializer.Serialize(x, JsonDateStyle.MsAjax)` / `AppSerializer.Deserialize<T>(json, JsonDateStyle.MsAjax)` (`\/Date(...)\/` dates and `"null"`, like JavaScriptSerializer). **Never** use the ISO default for a JavaScriptSerializer replacement.
+   - Calls through a wrapper that used one of these internally (e.g. `AppSerializer.Instance.Serialize(x)` from a separate helper DLL) → the same rule, based on which serializer the wrapper used.
 2. Replace `[JsonProperty("x")]` → `[DataMember(Name = "x")]`
 3. Remove `[JsonIgnore]` / `[ScriptIgnore]` (with `[DataContract]` on the class, unannotated members are excluded)
 4. Add `[DataContract]` to the class and `[DataMember]` to EVERY member that should serialize
 5. **Choose `Name` values carefully** — `DataContractJsonSerializer` is case-sensitive; the old serializers were not. Follow the table in `references/serializer-guide.md` → "Property Names Are Case-Sensitive". For any **deserialized** class whose real JSON casing you could not confirm, list it under **"Needs verification"**.
-6. **DateTime members**: if the class being serialized was previously serialized with `JavaScriptSerializer` and has `DateTime` members, the wire format changes — see serializer-guide → "DateTime Handling" and list it under **"Needs verification"**.
+6. **DateTime members**: with the style rule in step 1 the format stays the same. Only a class with **local** `DateTime` members sent with `MsAjax` to a non-.NET receiver goes under **"Needs verification"** (the timestamp gets an offset suffix — see serializer-guide → "DateTime Handling").
 7. Replace `JObject.Parse` → typed DTO + `AppSerializer.Deserialize<T>`
 8. Get `AppSerializer` from **Placing AppSerializer** below — never write a new copy without checking.
 
 ### Placing AppSerializer
 
-Check `ExistingAppSerializers` from the scan (or search the solution for `class AppSerializer` if the scanner could not run):
+Check `ExistingAppSerializers` from the scan (or search the solution for `class AppSerializer` if the scanner could not run). A class is only **reusable** (`Reusable: true`) when it can be linked as one self-contained source file: static `Serialize<T>` / `Deserialize<T>` API, only `System.*` dependencies, no interface/base class, and no `JavaScriptSerializer` / Newtonsoft inside. Classes with the same name but a different design — typically a `public` instance class with `AppSerializer.Instance` and an `IJsonSerializer` interface in its own helper **project** — are **not** reusable for plug-ins: referencing that DLL would be a runtime dependency (❌ online for workflow activities), and its interface can't be linked on its own. **Never modify such a class** — it belongs to the projects that own it (often full-trust API/Portal code).
 
-1. **Already compiled into this project** (its path is in `Files[]`) → use it. If `OldDateFormat` is true, update its date format per `references/serializer-guide.md` (it is shared — list its `LinkedBy` projects under "Projects to rebuild").
-2. **Exists elsewhere in the solution** → add it to this `.csproj` as a linked file, using the same `<Link>` folder convention as the project's other linked files:
+1. **A reusable one is already compiled into this project** (`CompiledIntoThisProject`) → use it. If `Upgrade` is true, replace its content with the current version from `references/serializer-guide.md` (same API plus `JsonDateStyle`), keep its namespace, and list its `LinkedBy` projects under "Projects to rebuild".
+2. **A reusable one exists elsewhere** → add it to this `.csproj` as a linked file, using the same `<Link>` folder convention as the project's other linked files:
    ```xml
    <Compile Include="..\..\Helper\LinkDev.Common.Crm.Utilities\AppSerializer.cs">
      <Link>Utilities\AppSerializer.cs</Link>
    </Compile>
    ```
-   If it is `public`, and this assembly references another assembly that also compiles it, change it to `internal` to avoid `CS0433` (list affected projects). Apply the `OldDateFormat` fix as in 1.
-3. **Does not exist** → if the project already links files from a shared helper folder (most `linked` entries share a parent folder, e.g. `Helper\...Utilities\`), create `AppSerializer.cs` there using the `internal` version from `references/serializer-guide.md`, with that folder's namespace, and link it. Only if the project has no linked files at all, create it in the project folder.
-4. Add the matching `using <namespace>;` to every file that calls it.
+   If it is `public`, and this assembly references another assembly that also compiles it, change it to `internal` to avoid `CS0433` (list affected projects). Apply the `Upgrade` as in 1.
+3. **No reusable one exists** → if the project already links files from a shared helper folder (most `linked` entries share a parent folder, e.g. `Helper\...Utilities\`), create `AppSerializer.cs` there using the `internal` version from `references/serializer-guide.md`, with that folder's namespace, and link it. Only if the project has no linked files at all, create it in the project folder.
+4. Add the matching `using <namespace>;` to every file that calls it. If a non-reusable `AppSerializer` in another namespace is also visible in that file, use the fully-qualified name to avoid ambiguity.
+5. **Always explain the choice** in the summary section **"Serializer decisions"**: which `AppSerializer` was used (path, namespace, new / linked / upgraded) and, for every other `AppSerializer` in the solution, one line on why it was not used — taken from its `Reasons`. Developers see several classes with the same name in Solution Explorer, so this must never be silent.
 
 ## Step 5: Clean Project References and NuGet Packages
 
@@ -302,6 +306,17 @@ For each modified file: path (with **[LINKED]** / **[SHARED]** when applicable),
 ### Blocked APIs Left in Place
 
 Table: location · blocked API · evidence it never runs in this assembly.
+
+### Serializer Decisions
+
+Only when serialization was touched. Example:
+
+```
+Used:     Helper\LinkDev.Common.Crm.Utilities\AppSerializer.cs (LinkDev.Common.Crm.Utilities) — linked, upgraded to JsonDateStyle version
+Not used: Helper\LinkDev.Common.Utilities\AppSerializer.cs (LinkDev.Common.Utilities) — instance/IJsonSerializer design in its own DLL,
+          still uses JavaScriptSerializer. Left unchanged (owned by LinkDev.Common.Utilities).
+Calls:    3 JavaScriptSerializer calls → AppSerializer.Serialize(x, JsonDateStyle.MsAjax) — JSON unchanged
+```
 
 ### Left As-Is On Purpose
 

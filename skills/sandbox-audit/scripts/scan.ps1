@@ -120,7 +120,7 @@ function Get-CompileFiles([string]$file, [bool]$isSdk) {
         foreach ($ch in $c.ChildNodes) { if ($ch.LocalName -eq 'Link') { $link = $ch.InnerText } }
         foreach ($f in (Resolve-Items (Expand-MsBuildPath $inc $dir) $dir)) {
             $src = if ($isProjitems) { 'shared' }
-                   elseif ($link -or $inc -match '^\.\.|[\\/]\.\.[\\/]' -or -not $f.StartsWith($projDir, [StringComparison]::OrdinalIgnoreCase)) { 'linked' }
+                   elseif ($link -or $inc -match '^\.\.|[\\/]\.\.[\\/]' -or -not $f.StartsWith($dir, [StringComparison]::OrdinalIgnoreCase)) { 'linked' }
                    else { 'local' }
             $map[$f] = @{ Path = $f; Include = $inc; Link = $link; Source = $src }
         }
@@ -396,17 +396,32 @@ if ($SolutionRoot) {
         Select-String -Pattern '\bclass\s+AppSerializer\b' -List |
         ForEach-Object {
             $content = [IO.File]::ReadAllText($_.Path)
+            $content = $content -replace '(?s)/\*.*?\*/', '' -replace '(?m)//.*$', ''   # ignore comments
             $ns = [regex]::Match($content, '\bnamespace\s+([\w\.]+)').Groups[1].Value
+            $decl = [regex]::Match($content, '\bclass\s+AppSerializer\b\s*(?::\s*(?<b>[^{]+))?')
+            $extUsings = @([regex]::Matches($content, '(?m)^\s*using\s+(?!System\b)(?!static\s+System\b)([\w\.]+)\s*;') | ForEach-Object { $_.Groups[1].Value })
             [pscustomobject]@{
                 Path = $_.Path
                 Namespace = $ns
-                Visibility = if ($content -match '\bpublic\s+(static\s+)?class\s+AppSerializer') { 'public' } else { 'internal' }
+                Visibility = if ($content -match '\bpublic\s+(sealed\s+|static\s+)?class\s+AppSerializer') { 'public' } else { 'internal' }
+                IsStatic = [bool]($content -match '\bstatic\s+class\s+AppSerializer\b')
+                HasGenericApi = [bool](($content -match '\bstatic\s+string\s+Serialize\s*<') -and ($content -match '\bstatic\s+T\s+Deserialize\s*<'))
+                HasDateStyle = [bool]($content -match '\bJsonDateStyle\b')
+                UsesBlockedSerializer = [bool]($content -match '\b(JavaScriptSerializer|JsonConvert|Newtonsoft)\b')
+                Implements = $(if ($decl.Groups['b'].Success) { $decl.Groups['b'].Value.Trim() } else { $null })
+                ExternalUsings = $extUsings
                 OldDateFormat = [bool]($content -match 'fffZ')
+                OwnedBy = @()
                 LinkedBy = @()
+                CompiledIntoThisProject = $false
+                Reusable = $false
+                Upgrade = $false
+                Reasons = @()
             }
         })
     $appSet = New-Object 'System.Collections.Generic.HashSet[string]' $cmp
     foreach ($a in $appSerializers) { [void]$appSet.Add($a.Path) }
+    $appOwners = New-Object 'System.Collections.Generic.Dictionary[string,object]' $cmp
     foreach ($pf in $projFiles) {
         try {
             [xml]$px = Get-Content -LiteralPath $pf.FullName -Raw
@@ -415,6 +430,10 @@ if ($SolutionRoot) {
                 if (-not $files.ContainsKey($cf.Path) -and -not $appSet.Contains($cf.Path)) { continue }
                 if (-not $linkCount.ContainsKey($cf.Path)) { $linkCount[$cf.Path] = New-Object System.Collections.Generic.List[string] }
                 if (-not $linkCount[$cf.Path].Contains($pf.BaseName)) { $linkCount[$cf.Path].Add($pf.BaseName) }
+                if ($appSet.Contains($cf.Path) -and $cf.Source -eq 'local') {
+                    if (-not $appOwners.ContainsKey($cf.Path)) { $appOwners[$cf.Path] = New-Object System.Collections.Generic.List[string] }
+                    $appOwners[$cf.Path].Add($pf.BaseName)
+                }
             }
         } catch { Write-Warning "Could not parse $($pf.FullName): $($_.Exception.Message)" }
     }
@@ -543,7 +562,24 @@ foreach ($f in $files.Values) {
         SharedBy = $sharedBy
     })
 }
-foreach ($a in $appSerializers) { if ($linkCount.ContainsKey($a.Path)) { $a.LinkedBy = $linkCount[$a.Path].ToArray() } }
+foreach ($a in $appSerializers) {
+    if ($linkCount.ContainsKey($a.Path)) { $a.LinkedBy = $linkCount[$a.Path].ToArray() }
+    if ($appOwners.ContainsKey($a.Path)) { $a.OwnedBy = $appOwners[$a.Path].ToArray() }
+    $a.CompiledIntoThisProject = $files.ContainsKey($a.Path)
+    # Reusable = can be linked as one self-contained source file with the static AppSerializer API
+    $blockers = New-Object System.Collections.Generic.List[string]
+    if ($a.UsesBlockedSerializer) { $blockers.Add('uses JavaScriptSerializer / Newtonsoft (blocked in Sandbox)') }
+    if (-not $a.IsStatic -or -not $a.HasGenericApi) { $blockers.Add('instance / interface style API (e.g. AppSerializer.Instance.Serialize), not the static Serialize<T> / Deserialize<T> helper') }
+    if ($a.Implements) { $blockers.Add("implements $($a.Implements) - cannot be linked as a single file") }
+    if (@($a.ExternalUsings).Count) { $blockers.Add("depends on $((@($a.ExternalUsings)) -join ', ') - cannot be linked as a single file") }
+    $notes = New-Object System.Collections.Generic.List[string]
+    if (@($a.OwnedBy).Count) { $notes.Add("part of project $((@($a.OwnedBy)) -join ', ') (its own DLL) - plug-ins must link the file, never reference that DLL") }
+    if ($a.OldDateFormat) { $notes.Add('old date format ...fffZ - replace with the current AppSerializer version') }
+    elseif (-not $a.HasDateStyle -and $blockers.Count -eq 0) { $notes.Add('no JsonDateStyle option - replace with the current AppSerializer version (same API, adds the option)') }
+    $a.Reusable = ($blockers.Count -eq 0)
+    $a.Upgrade = ($blockers.Count -eq 0) -and ($a.OldDateFormat -or -not $a.HasDateStyle)
+    $a.Reasons = @($blockers) + @($notes)
+}
 
 # ---------------------------------------------------------------- references
 $refs = @(Get-XmlNodes $projXml 'Reference' | ForEach-Object { ($_.GetAttribute('Include') -split ',')[0] })
@@ -688,7 +724,15 @@ $c = $result.Counts
 Write-Output "Project: $projName ($($result.ProjectStyle), $targetFw) -> $assemblyName.dll"
 Write-Output "Files: $($c.Files) compiled ($($c.Local) local, $($c.Linked) linked, $($c.Shared) shared) | missing: $($c.Missing) | unresolved includes: $($unresolved.Count)"
 Write-Output "Hits: $($c.Hits) in $($c.FilesWithHits) files (Blocked $($c.Blocked), Avoid $($c.Avoid), Review $($c.Review), Harden $($c.Harden), Using $(@($hits | Where-Object Severity -eq 'Using').Count))"
-if ($SolutionRoot) { Write-Output "Solution: $solutionProjects projects scanned for shared links | existing AppSerializer: $(@($appSerializers).Count)" }
+if ($SolutionRoot) {
+    Write-Output "Solution: $solutionProjects projects scanned for shared links | existing AppSerializer: $(@($appSerializers).Count)"
+    foreach ($a in $appSerializers) {
+        $verdict = if (-not $a.Reusable) { 'NOT reusable' } elseif ($a.Upgrade) { 'reusable after upgrade' } else { 'reusable' }
+        $where = if ($a.CompiledIntoThisProject) { ' [already compiled into this project]' } else { '' }
+        Write-Output ("  {0} ({1}, {2}) -> {3}{4}" -f $a.Path, $a.Namespace, $a.Visibility, $verdict, $where)
+        foreach ($r in $a.Reasons) { Write-Output "     - $r" }
+    }
+}
 Write-Output "--- hits (file:line [severity/category] api | member) ---"
 foreach ($h in ($hits | Sort-Object Source, File, Line)) {
     $rel = if ($h.File.StartsWith($projDir, [StringComparison]::OrdinalIgnoreCase)) { $h.File.Substring($projDir.Length).TrimStart('\', '/') } else { $h.File }

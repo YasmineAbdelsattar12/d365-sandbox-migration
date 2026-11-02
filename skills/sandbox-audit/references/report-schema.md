@@ -36,6 +36,12 @@ Write the file as **UTF-8**. Every field is optional; empty sections are left ou
     { "File": "Helper\\...\\Logger.cs", "Tag": "LINKED", "Description": ["..."], "Lines": "..." }
   ],
 
+  "SerializerDecisions": [
+    "Used: Helper\\LinkDev.Common.Crm.Utilities\\AppSerializer.cs (LinkDev.Common.Crm.Utilities) - linked, upgraded to the JsonDateStyle version",
+    "Not used: Helper\\LinkDev.Common.Utilities\\AppSerializer.cs - instance/IJsonSerializer design in its own DLL, still uses JavaScriptSerializer; left unchanged",
+    "3 JavaScriptSerializer calls -> AppSerializer.Serialize(x, JsonDateStyle.MsAjax) - JSON output unchanged"
+  ],
+
   "LeftInPlace": [ { "Location": "Tools.cs:694 GetMimeType", "Api": "Registry", "Evidence": "No call sites in the 78 compiled files" } ],
   "LeftOnPurpose": [".Result kept in MigrateFileLocations.cs:120 - code catches AggregateException"],
   "NeedsVerification": ["CreateFileLocationsModel: DateTime members now serialize as ISO 8601 - confirm the API accepts it"],

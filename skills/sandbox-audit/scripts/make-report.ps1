@@ -134,7 +134,7 @@ $kv = @(
     @('New files', $(if (Has $s.NewFiles) { E ((Arr $s.NewFiles) -join ', ') } else { 'None' })),
     @('Build', ((Badge $s.BuildResult $s.BuildResult) + ' ' + (E $s.DllPath))),
     @('Assembly size', (E $s.DllSize)),
-    @('Version / signature', (E ("{0} - public key token {1}" -f $s.DllVersion, $s.PublicKeyToken))),
+    @('Version / signature', $(if ($s.DllVersion -or $s.PublicKeyToken) { E ("{0} - public key token {1}" -f $s.DllVersion, $(if ($s.PublicKeyToken) { $s.PublicKeyToken } else { 'none (not signed)' })) } else { '' })),
     @('Git baseline', (E $s.GitBaseline)),
     @('Online readiness', (Badge $s.OnlineVerdict $s.OnlineVerdictText))
 )
@@ -154,6 +154,9 @@ if (Has $d.Changes) {
     }
     Add-Section 'Changes made' (Table @('File', 'Change', 'Lines') $rows)
 } else { Add-Section 'Changes made' '<p class="muted">No source changes were needed.</p>' }
+
+# 2b. Serializer decisions
+if (Has $d.SerializerDecisions) { Add-Section 'Serializer decisions' ('<p class="muted small">Which AppSerializer this project uses, and why other classes with the same name in the solution were not used.</p>' + (List $d.SerializerDecisions)) }
 
 # 3. Code diff
 if ($diffBlocks.Count) {
