@@ -83,3 +83,5 @@ Write the file as **UTF-8**. Every field is optional; empty sections are left ou
 `ChangedPaths` (git) — every file modified **or created** during the run, absolute paths: `.cs` files, linked files, the `.csproj`, `packages.config`. New (untracked) files are shown in full as added.
 
 `Baseline` — free text shown as "Compared with ..." when there is no git commit (TFVC, or no version control). For TFVC, also pass the unified diff file to `make-report.ps1 -DiffFile`.
+
+`SerializerDecisions` — every shared helper decision (the serializer and the helpers in `shared-helpers.md`); rendered as "Shared helper decisions".

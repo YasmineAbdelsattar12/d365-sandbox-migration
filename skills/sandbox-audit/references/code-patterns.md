@@ -92,73 +92,19 @@ using (var client = new HttpClient())
 6. `InvalidPluginExecutionException` for failures
 7. DNS host name over HTTPS, anonymous or token auth — no IP addresses, no Windows credentials
 
-## System.Web Replacement: MimeMapping
+## System.Web Replacement: MimeMapping and ParseQueryString
 
 ```csharp
-// BEFORE (blocked — System.Web)
+// BEFORE (blocked - System.Web)
 string mimeType = MimeMapping.GetMimeMapping(fileName);
-
-// AFTER — local helper
-public static string GetMimeType(string fileName)
-{
-    string ext = Path.GetExtension(fileName)?.ToLowerInvariant();
-    switch (ext)
-    {
-        case ".pdf":  return "application/pdf";
-        case ".doc":  return "application/msword";
-        case ".docx": return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-        case ".xls":  return "application/vnd.ms-excel";
-        case ".xlsx": return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-        case ".ppt":  return "application/vnd.ms-powerpoint";
-        case ".pptx": return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
-        case ".png":  return "image/png";
-        case ".jpg":
-        case ".jpeg": return "image/jpeg";
-        case ".gif":  return "image/gif";
-        case ".bmp":  return "image/bmp";
-        case ".svg":  return "image/svg+xml";
-        case ".txt":  return "text/plain";
-        case ".csv":  return "text/csv";
-        case ".html": return "text/html";
-        case ".xml":  return "application/xml";
-        case ".json": return "application/json";
-        case ".zip":  return "application/zip";
-        default:      return "application/octet-stream";
-    }
-}
-```
-
-## System.Web Replacement: ParseQueryString
-
-```csharp
-// BEFORE (blocked — System.Web)
 var qs = HttpUtility.ParseQueryString(url.Query);
-string value = qs["key"];
 
-// AFTER
-public static Dictionary<string, string> ParseQueryString(string query)
-{
-    var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-    if (string.IsNullOrEmpty(query)) return result;
-
-    // Remove leading '?'
-    if (query.StartsWith("?")) query = query.Substring(1);
-
-    foreach (var pair in query.Split('&'))
-    {
-        var parts = pair.Split(new[] { '=' }, 2);
-        if (parts.Length == 2)
-        {
-            result[Uri.UnescapeDataString(parts[0])] = Uri.UnescapeDataString(parts[1]);
-        }
-        else if (parts.Length == 1 && !string.IsNullOrEmpty(parts[0]))
-        {
-            result[Uri.UnescapeDataString(parts[0])] = string.Empty;
-        }
-    }
-    return result;
-}
+// AFTER - shared helpers (one file each, linked; see shared-helpers.md)
+string mimeType = MimeTypeHelper.GetMimeType(fileName);
+var qs = QueryStringHelper.ParseQueryString(url.Query);   // same NameValueCollection behaviour
 ```
+
+Never paste the helper code into the class being fixed — follow the placement rules in `shared-helpers.md`.
 
 ## CSharpCodeProvider Reflection Pattern
 
@@ -280,38 +226,13 @@ public class MyPlugin : IPlugin
 
 ## D365 Environment Variables (v9.1+)
 
-For configuration that changes between environments (dev/test/prod):
+For configuration that changes between environments (dev/test/prod), once the team has decided to move a setting to a Dataverse environment variable:
 
 ```csharp
-public static string GetEnvironmentVariable(IOrganizationService service, string schemaName)
-{
-    var query = new QueryExpression("environmentvariabledefinition")
-    {
-        ColumnSet = new ColumnSet("defaultvalue"),
-        Criteria = new FilterExpression
-        {
-            Conditions =
-            {
-                new ConditionExpression("schemaname", ConditionOperator.Equal, schemaName)
-            }
-        }
-    };
-
-    // Link to value override
-    var valueLink = query.AddLink("environmentvariablevalue", "environmentvariabledefinitionid", "environmentvariabledefinitionid", JoinOperator.LeftOuter);
-    valueLink.EntityAlias = "val";
-    valueLink.Columns = new ColumnSet("value");
-
-    var result = service.RetrieveMultiple(query);
-    if (result.Entities.Count == 0) return null;
-
-    var entity = result.Entities[0];
-    // Value override takes precedence over default
-    var overrideValue = entity.GetAttributeValue<AliasedValue>("val.value");
-    if (overrideValue != null) return overrideValue.Value?.ToString();
-    return entity.GetAttributeValue<string>("defaultvalue");
-}
+string apiUrl = EnvironmentVariableHelper.Get(service, "contoso_DocumentsApiUrl");
 ```
+
+`EnvironmentVariableHelper` is a shared helper — code and placement rules in `shared-helpers.md`.
 
 ## Assembly Re-Registration Checklist
 

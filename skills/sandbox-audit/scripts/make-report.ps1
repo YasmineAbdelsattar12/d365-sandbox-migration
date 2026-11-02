@@ -203,7 +203,7 @@ if (Has $d.Changes) {
 } else { Add-Section 'Changes made' '<p class="muted">No source changes were needed.</p>' }
 
 # 2b. Serializer decisions
-if (Has $d.SerializerDecisions) { Add-Section 'Serializer decisions' ('<p class="muted small">Which AppSerializer this project uses, and why other classes with the same name in the solution were not used.</p>' + (List $d.SerializerDecisions)) }
+if (Has $d.SerializerDecisions) { Add-Section 'Shared helper decisions' ('<p class="muted small">Which shared helpers (serializer and other helpers) this project uses, and why other classes with the same names in the solution were not used.</p>' + (List $d.SerializerDecisions)) }
 
 # 3. Code diff
 if ($diffBlocks.Count) {

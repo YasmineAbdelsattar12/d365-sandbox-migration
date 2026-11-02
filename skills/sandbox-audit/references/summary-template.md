@@ -36,9 +36,9 @@ Every finding with `Accepted`, with file, line, API and the team's reason. Say w
 
 Table: location · blocked API · evidence it never runs in this assembly.
 
-## Serializer Decisions
+## Shared Helper Decisions
 
-Only when serialization was touched. Example:
+Only when serialization or a shared helper (`references/shared-helpers.md`) was involved. One line per helper used, and one per same-named class elsewhere that was not used (with its `Reasons`). Example:
 
 ```
 Strategy: builtin (sandbox-audit.json) / existing team class / default
@@ -46,6 +46,8 @@ Used:     Shared\Crm.Common\AppSerializer.cs (Contoso.Crm.Common) — linked, up
 Not used: Shared\Contoso.Common.Utilities\AppSerializer.cs (Contoso.Common.Utilities) — instance/IJsonSerializer design in its own DLL,
           still uses JavaScriptSerializer. Left unchanged (owned by Contoso.Common.Utilities).
 Calls:    3 JavaScriptSerializer calls → AppSerializer.Serialize(x, JsonDateStyle.MsAjax) — JSON unchanged
+Helper:   MimeTypeHelper — created in Shared\Crm.Common (Contoso.Crm.Common), linked; replaces 2 MimeMapping calls
+Not used: ProjB\Utils\QueryStringHelper.cs — returns Dictionary, not a drop-in for HttpUtility.ParseQueryString; left unchanged
 ```
 
 ## Left As-Is On Purpose

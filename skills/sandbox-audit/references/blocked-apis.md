@@ -61,8 +61,8 @@ Rows are **Blocked** unless marked *(Avoid)*. For Dataverse Online, also apply `
 | `HttpUtility.UrlDecode(s)` | `Uri.UnescapeDataString(s)` |
 | `HttpUtility.HtmlEncode(s)` | `System.Net.WebUtility.HtmlEncode(s)` |
 | `HttpUtility.HtmlDecode(s)` | `System.Net.WebUtility.HtmlDecode(s)` |
-| `HttpUtility.ParseQueryString(s)` | Manual split on `&` and `=`, then `Uri.UnescapeDataString` each part |
-| `MimeMapping.GetMimeMapping(fileName)` | Local `GetMimeType()` helper — see `code-patterns.md` |
+| `HttpUtility.ParseQueryString(s)` | `QueryStringHelper.ParseQueryString(s)` — shared helper, see `shared-helpers.md` |
+| `MimeMapping.GetMimeMapping(fileName)` | `MimeTypeHelper.GetMimeType(fileName)` — shared helper, see `shared-helpers.md` |
 | `JavaScriptSerializer` | `DataContractJsonSerializer` — see `serializer-guide.md` |
 | `[ScriptIgnore]` | `[DataContract]`/`[DataMember]` opt-in — see `serializer-guide.md` |
 | `HttpServerUtility.MapPath` | Not applicable in Sandbox |

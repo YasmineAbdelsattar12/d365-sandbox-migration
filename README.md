@@ -39,7 +39,8 @@ One optional file per repository. Everything in it is described in [`skills/sand
 | `target` | `online` | Skip the "Online or on-prem?" question |
 | `report` | `{ "enabled": true, "location": "repo" }` | Always create the PDF, in `docs/sandbox-migration` |
 | `serializer` | `builtin`, or `existing` + your class files and call pattern | Use the team's own Sandbox-safe serializer everywhere, or the skill's builtin helper with your class name / namespace |
-| `sharedHelperFolder` | `Shared/Crm.Common` | Where shared helper files are created and linked from |
+| `sharedHelperFolder` | `Shared/Crm.Common` | Where **every** shared helper file (serializer, MIME types, query strings, environment variables) is created once and linked from |
+| `sharedHelperNamespace` | `Contoso.Crm.Common` | Namespace for new shared helper files |
 | `skipProjects` | `["*.Api", "*.Portal", "*.Tests"]` | Never migrate or suggest full-trust projects |
 | `http.timeoutSeconds` | `60` | Timeout put on outbound HTTP calls |
 | `acceptedFindings` | `{ "file": "Shared/Logger.cs", "api": "EventLog", "reason": "..." }` | Findings the team reviewed and accepted — reported as *Accepted* (with the reason), not fixed |
@@ -52,11 +53,12 @@ Findings can also be accepted inline: `// sandbox-ignore: reason` on the same li
 2. **Checks version control first** (git or TFVC) so each project's migration can be reviewed and reverted on its own
 3. **Fixes live violations only** — blocked APIs in methods nothing calls are left alone with evidence; shared files linked by many projects are never edited silently
 4. **Serializers without changing the JSON** — `JavaScriptSerializer` / Newtonsoft → a Sandbox-safe `DataContractJsonSerializer` helper that keeps the same date format (`\/Date(...)\/` or ISO), uses the runtime type, and handles case-sensitive property names — or the team's own serializer from the settings
-5. **HTTP hardening** — TLS 1.2, timeout, KeepAlive off, `.GetAwaiter().GetResult()` (except where code relies on `AggregateException`), `InvalidPluginExecutionException`
-6. **Cleans references and packages**, then **builds** with MSBuild found automatically on any machine (vswhere), and fixes build errors it caused
-7. **Verifies the DLL** — real runtime dependencies, strong-name signature, 16 MB limit, assembly version change that would break the in-place update
-8. **Dataverse Online readiness** — every HTTP call and where its URL comes from, IP / internal / `.local` addresses, Windows credentials, .NET Framework 4.6.2 / 4.8, dependencies (plug-in packages don't support workflow activities), calls inside loops (2-minute limit), with a ✅ / ⚠️ / ❌ verdict and a "before go-live" list
-9. **Summary + optional PDF report** — every change with the real code diff, accepted findings, serializer decisions, items to verify or decide, projects to rebuild, online readiness tables and a test checklist
+5. **Shared helpers, never copies** — fixes that need a helper (`MimeTypeHelper` for `MimeMapping`, `QueryStringHelper` for `HttpUtility.ParseQueryString`, `EnvironmentVariableHelper` for settings moved to Dataverse environment variables) use one shared file in the shared helper folder, reused or linked if it already exists, and behaving exactly like the API it replaces
+6. **HTTP hardening** — TLS 1.2, timeout, KeepAlive off, `.GetAwaiter().GetResult()` (except where code relies on `AggregateException`), `InvalidPluginExecutionException`
+7. **Cleans references and packages**, then **builds** with MSBuild found automatically on any machine (vswhere), and fixes build errors it caused
+8. **Verifies the DLL** — real runtime dependencies, strong-name signature, 16 MB limit, assembly version change that would break the in-place update
+9. **Dataverse Online readiness** — every HTTP call and where its URL comes from, IP / internal / `.local` addresses, Windows credentials, .NET Framework 4.6.2 / 4.8, dependencies (plug-in packages don't support workflow activities), calls inside loops (2-minute limit), with a ✅ / ⚠️ / ❌ verdict and a "before go-live" list
+10. **Summary + optional PDF report** — every change with the real code diff, accepted findings, shared helper decisions, items to verify or decide, projects to rebuild, online readiness tables and a test checklist
 
 ## Requirements
 
@@ -110,6 +112,7 @@ https://github.com/YasmineAbdelsattar12/d365-sandbox-migration
 
 ## Changelog
 
+- **1.7.0** — Shared helpers for every fix that needs one, not only the serializer: `MimeTypeHelper`, `QueryStringHelper` (now a `NameValueCollection` exactly like `HttpUtility`, `+` as space) and `EnvironmentVariableHelper`, one file each in `sharedHelperFolder`, reused or linked if they exist; scanner finds and judges existing helpers anywhere in the solution; new `sharedHelperNamespace` setting; "Shared helper decisions" in the summary and PDF
 - **1.6.2** — Setup writes plain JSON without comments (explanations go into `notes`), so Windows PowerShell 5.1 can read the settings file
 - **1.6.1** — Owner shown on every PDF report (cover and footer) and in every script header
 - **1.6.0** — For any team and project: per-repo settings file `sandbox-audit.json` (target, report, serializer strategy incl. the team's own class, shared helper folder, projects to skip, HTTP timeout, accepted findings) with validation; inline `// sandbox-ignore: reason`; **setup mode** (`-ListProjects` overview of the whole repo) and **report-only mode**; TFVC support (safety check, `tf diff` in the PDF); `build.ps1` finds MSBuild via vswhere, restores packages and inspects the DLL; project suggestions come from a real project scan; neutral examples; skill instructions split into reference files

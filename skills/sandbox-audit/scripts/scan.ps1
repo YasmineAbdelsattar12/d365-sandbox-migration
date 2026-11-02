@@ -142,7 +142,9 @@ foreach ($sp in @(Get-Prop $raw 'acceptedFindings' @())) {
 $skipProjects = @(Get-Prop $raw 'skipProjects' @())
 $httpTimeout = [int](Get-Prop (Get-Prop $raw 'http' $null) 'timeoutSeconds' 90)
 if ($httpTimeout -lt 1 -or $httpTimeout -gt 110) { $cfgWarnings.Add("http.timeoutSeconds $httpTimeout is outside 1-110; plug-ins are stopped at 120 s - using 90"); $httpTimeout = 90 }
-$knownKeys = @('$schema', 'version', 'target', 'report', 'serializer', 'sharedHelperFolder', 'skipProjects', 'http', 'acceptedFindings', 'notes')
+$knownKeys = @('$schema', 'version', 'target', 'report', 'serializer', 'sharedHelperFolder', 'sharedHelperNamespace', 'skipProjects', 'http', 'acceptedFindings', 'notes')
+$sharedHelperNs = [string](Get-Prop $raw 'sharedHelperNamespace' '')
+if ($sharedHelperNs -and $sharedHelperNs -notmatch '^[A-Za-z_][\w]*(\.[A-Za-z_][\w]*)*$') { $cfgErrors.Add("sharedHelperNamespace is not a valid C# namespace: '$sharedHelperNs'"); $sharedHelperNs = '' }
 if ($raw) { foreach ($pn in $raw.PSObject.Properties.Name) { if ($knownKeys -notcontains $pn) { $cfgWarnings.Add("Unknown setting '$pn' (ignored)") } } }
 $sharedHelper = Resolve-CfgPath ([string](Get-Prop $raw 'sharedHelperFolder' '')) $cfgDir
 if ($sharedHelper -and -not (Test-Path -LiteralPath $sharedHelper)) { $cfgWarnings.Add("sharedHelperFolder does not exist yet: $sharedHelper") }
@@ -507,13 +509,52 @@ if (-not $isSdk) {
 # ---------------------------------------------------------------- solution-wide info (optional)
 $linkCount = New-Object 'System.Collections.Generic.Dictionary[string,object]' $cmp
 $appSerializers = @()
+$existingHelpers = New-Object System.Collections.Generic.List[object]
+$helperNames = @('MimeTypeHelper', 'QueryStringHelper', 'EnvironmentVariableHelper')
+$helperApi = @{ MimeTypeHelper = '\bstatic\s+string\s+GetMimeType\s*\('; QueryStringHelper = '\bstatic\s+[\w<>,\.\s]+?\s+ParseQueryString\s*\('; EnvironmentVariableHelper = '\bstatic\s+string\s+Get\s*\(' }
+function New-HelperInfo([string]$path, [string]$name) {
+    $content = [IO.File]::ReadAllText($path) -replace '(?s)/\*.*?\*/', '' -replace '(?m)//.*$', ''
+    $decl = [regex]::Match($content, '\bclass\s+' + $name + '\b\s*(?::\s*(?<b>[^{]+))?')
+    $blocked = New-Object System.Collections.Generic.List[string]
+    foreach ($ln in ($content -split "`n")) {
+        if ($ln.Trim() -match '^using\s' -or -not $prefilter.IsMatch($ln)) { continue }
+        foreach ($pt in $compiled) { if (($pt.Severity -eq 'Blocked' -or $pt.Severity -eq 'Avoid') -and $pt.Regex.IsMatch($ln)) { $blocked.Add($pt.Api) } }
+    }
+    return [pscustomobject]@{
+        Name = $name; Path = $path
+        Namespace = [regex]::Match($content, '\bnamespace\s+([\w\.]+)').Groups[1].Value
+        Visibility = $(if ($content -match ('\bpublic\s+(sealed\s+|static\s+)*class\s+' + $name + '\b')) { 'public' } else { 'internal' })
+        IsStatic = [bool]($content -match ('\bstatic\s+class\s+' + $name + '\b'))
+        HasExpectedApi = [bool]($content -match $helperApi[$name])
+        ReturnsDictionary = [bool]($name -eq 'QueryStringHelper' -and $content -match 'Dictionary\s*<\s*string\s*,\s*string\s*>\s+ParseQueryString')
+        Implements = $(if ($decl.Groups['b'].Success) { $decl.Groups['b'].Value.Trim() } else { $null })
+        ExternalUsings = @([regex]::Matches($content, '(?m)^\s*using\s+(?!System\b)(?!Microsoft\.Xrm\.Sdk\b)(?!Microsoft\.Crm\.Sdk\b)(?!static\s+System\b)([\w\.]+)\s*;') | ForEach-Object { $_.Groups[1].Value })
+        BlockedApis = @($blocked | Sort-Object -Unique)
+        OwnedBy = @(); LinkedBy = @(); CompiledIntoThisProject = $false; Reusable = $false; Reasons = @()
+    }
+}
 $solutionProjects = 0
+if (-not $SolutionRoot) {
+    # no solution root: only helpers already compiled into this project can be found
+    foreach ($fp in $files.Keys) {
+        if (-not (Test-Path -LiteralPath $fp)) { continue }
+        $txt = [IO.File]::ReadAllText($fp)
+        foreach ($hn in $helperNames) { if ($txt -match ('\bclass\s+' + $hn + '\b')) { $existingHelpers.Add((New-HelperInfo $fp $hn)) } }
+    }
+}
 if ($SolutionRoot) {
     $projFiles = @(Get-ChildItem -LiteralPath $SolutionRoot -Recurse -Filter *.csproj -File -ErrorAction SilentlyContinue |
         Where-Object { $_.FullName -notmatch $excludeDirs })
     $solutionProjects = $projFiles.Count
-    $appSerializers = @(Get-ChildItem -LiteralPath $SolutionRoot -Recurse -Filter *.cs -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -notmatch $excludeDirs } |
+    $allCs = @(Get-ChildItem -LiteralPath $SolutionRoot -Recurse -Filter *.cs -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -notmatch $excludeDirs })
+    foreach ($m in @($allCs | Select-String -Pattern ('\bclass\s+(' + ($helperNames -join '|') + ')\b') -AllMatches)) {
+        foreach ($mm in $m.Matches) {
+            $hn = $mm.Groups[1].Value
+            if (-not ($existingHelpers | Where-Object { $_.Path -eq $m.Path -and $_.Name -eq $hn })) { $existingHelpers.Add((New-HelperInfo $m.Path $hn)) }
+        }
+    }
+    $appSerializers = @($allCs |
         Select-String -Pattern ('\bclass\s+' + $serClass + '\b') -List |
         ForEach-Object {
             $content = [IO.File]::ReadAllText($_.Path)
@@ -542,6 +583,7 @@ if ($SolutionRoot) {
         })
     $appSet = New-Object 'System.Collections.Generic.HashSet[string]' $cmp
     foreach ($a in $appSerializers) { [void]$appSet.Add($a.Path) }
+    foreach ($h in $existingHelpers) { [void]$appSet.Add($h.Path) }
     $appOwners = New-Object 'System.Collections.Generic.Dictionary[string,object]' $cmp
     foreach ($pf in $projFiles) {
         try {
@@ -577,6 +619,23 @@ foreach ($a in $appSerializers) {
     $a.Reusable = ($blockers.Count -eq 0)
     $a.Upgrade = ($blockers.Count -eq 0) -and ($a.OldDateFormat -or -not $a.HasDateStyle)
     $a.Reasons = @($blockers) + @($notes)
+}
+
+foreach ($h in $existingHelpers) {
+    if ($linkCount.ContainsKey($h.Path)) { $h.LinkedBy = $linkCount[$h.Path].ToArray() }
+    if ($SolutionRoot -and $appOwners.ContainsKey($h.Path)) { $h.OwnedBy = $appOwners[$h.Path].ToArray() }
+    $h.CompiledIntoThisProject = $files.ContainsKey($h.Path)
+    $blockers = New-Object System.Collections.Generic.List[string]
+    if (@($h.BlockedApis).Count) { $blockers.Add("uses $((@($h.BlockedApis)) -join ', ') (not Sandbox-safe)") }
+    if (-not $h.IsStatic) { $blockers.Add('not a static class') }
+    if (-not $h.HasExpectedApi) { $blockers.Add('different API than the shared helper (see shared-helpers.md)') }
+    if ($h.ReturnsDictionary) { $blockers.Add('returns Dictionary<string,string> - not a drop-in replacement for HttpUtility.ParseQueryString (a missing key throws instead of returning null)') }
+    if ($h.Implements) { $blockers.Add("implements / inherits $($h.Implements) - cannot be linked as a single file") }
+    if (@($h.ExternalUsings).Count) { $blockers.Add("depends on $((@($h.ExternalUsings)) -join ', ') - cannot be linked as a single file") }
+    $notes = New-Object System.Collections.Generic.List[string]
+    if (@($h.OwnedBy).Count) { $notes.Add("part of project $((@($h.OwnedBy)) -join ', ') (its own DLL) - plug-ins must link the file, never reference that DLL") }
+    $h.Reusable = ($blockers.Count -eq 0)
+    $h.Reasons = @($blockers) + @($notes)
 }
 
 # ---------------------------------------------------------------- -ListProjects (setup mode)
@@ -639,7 +698,7 @@ if ($ListProjects) {
     $out = [pscustomobject]@{
         SolutionRoot = $SolutionRoot; Settings = [pscustomobject]@{ Path = $cfgPath; Errors = $cfgErrors.ToArray(); Warnings = $cfgWarnings.ToArray() }
         VersionControl = (Get-Vcs $SolutionRoot); SerializerClassName = $serClass
-        Projects = $rows.ToArray(); SharedFolderCandidates = $topFolders; ExistingSerializers = @($appSerializers)
+        Projects = $rows.ToArray(); SharedFolderCandidates = $topFolders; ExistingSerializers = @($appSerializers); ExistingHelpers = $existingHelpers.ToArray()
         Counts = [pscustomobject]@{ Projects = $rows.Count; PluginOrWorkflow = @($rows | Where-Object { $_.Kind -ne 'Other' }).Count; LikelyFullTrust = @($rows | Where-Object { $_.Hint }).Count; Skipped = @($rows | Where-Object { $_.Skipped }).Count }
         ElapsedSeconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
     }
@@ -654,6 +713,8 @@ if ($ListProjects) {
     foreach ($t in $topFolders) { Write-Output ("  {0} ({1} projects)" -f $t.Folder, $t.UsedByPluginProjects) }
     Write-Output ("Existing {0} classes: {1}" -f $serClass, @($appSerializers).Count)
     foreach ($a in $appSerializers) { Write-Output ("  {0} - {1}" -f (Get-RelToRoot $a.Path), $(if ($a.Reusable) { 'reusable' } else { 'not reusable: ' + (@($a.Reasons) -join '; ') })) }
+    Write-Output ("Existing shared helpers: {0}" -f $existingHelpers.Count)
+    foreach ($h in $existingHelpers) { Write-Output ("  {0} {1} - {2}" -f $h.Name, (Get-RelToRoot $h.Path), $(if ($h.Reusable) { 'reusable' } else { 'not reusable: ' + (@($h.Reasons) -join '; ') })) }
     Write-Output "JSON: $OutFile  ($($out.ElapsedSeconds)s)"
     return
 }
@@ -943,7 +1004,7 @@ if ($serStrategy -eq 'existing') {
 $settings = [pscustomobject]@{
     Path = $cfgPath; Loaded = [bool]$raw; Errors = $cfgErrors.ToArray(); Warnings = $cfgWarnings.ToArray()
     Target = $target; ReportEnabled = $repEnabled; ReportLocation = $repLocation
-    SharedHelperFolder = $sharedHelper; SkipProjects = $skipProjects; HttpTimeoutSeconds = $httpTimeout
+    SharedHelperFolder = $sharedHelper; SharedHelperNamespace = $sharedHelperNs; SkipProjects = $skipProjects; HttpTimeoutSeconds = $httpTimeout
     AcceptedFindings = $suppressions.ToArray()
 }
 
@@ -984,6 +1045,7 @@ $result = [pscustomobject]@{
     SolutionRoot       = $SolutionRoot
     SolutionProjects   = $solutionProjects
     ExistingAppSerializers = @($appSerializers)
+    ExistingHelpers    = $existingHelpers.ToArray()
     ElapsedSeconds     = [math]::Round($sw.Elapsed.TotalSeconds, 1)
 }
 $outDir = Split-Path -Parent $OutFile
@@ -1010,6 +1072,13 @@ if ($SolutionRoot) {
         $where = if ($a.CompiledIntoThisProject) { ' [already compiled into this project]' } else { '' }
         Write-Output ("  {0} ({1}, {2}) -> {3}{4}" -f $a.Path, $a.Namespace, $a.Visibility, $verdict, $where)
         foreach ($r in $a.Reasons) { Write-Output "     - $r" }
+    }
+}
+if ($existingHelpers.Count) {
+    Write-Output ("Existing shared helpers: {0}" -f $existingHelpers.Count)
+    foreach ($h in $existingHelpers) {
+        Write-Output ("  {0} {1} ({2}) -> {3}{4}" -f $h.Name, $h.Path, $h.Namespace, $(if ($h.Reusable) { 'reusable' } else { 'NOT reusable' }), $(if ($h.CompiledIntoThisProject) { ' [already compiled into this project]' } else { '' }))
+        foreach ($r in $h.Reasons) { Write-Output "     - $r" }
     }
 }
 Write-Output "--- hits (file:line [severity/category] api | member) ---"

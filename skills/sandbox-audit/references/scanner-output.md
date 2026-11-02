@@ -2,7 +2,7 @@
 
 | JSON field | Meaning |
 |---|---|
-| `Settings` | `Path` of `sandbox-audit.json` (or null), `Errors`, `Warnings`, and the effective values: `Target`, `ReportEnabled`, `ReportLocation`, `SharedHelperFolder`, `SkipProjects`, `HttpTimeoutSeconds`, `AcceptedFindings` |
+| `Settings` | `Path` of `sandbox-audit.json` (or null), `Errors`, `Warnings`, and the effective values: `Target`, `ReportEnabled`, `ReportLocation`, `SharedHelperFolder`, `SharedHelperNamespace`, `SkipProjects`, `HttpTimeoutSeconds`, `AcceptedFindings` |
 | `SerializerCheck` | Configured serializer strategy. `builtin`: `ClassName`, `Namespace`, `File`. `existing`: `Files[]`, `SerializeCall`, `DeserializeCall`, `Usings`, `DateStyle`, `SandboxSafe`, `Problems[]`, `CompiledIntoThisProject` |
 | `VersionControl` | `Type` = `git` / `tfvc` / `none`, and `Root` |
 | `Files[]` | Every compiled `.cs` file: `Source` = `local` / `linked` / `shared`, `Exists`, `Hits`, `Types`, `SharedBy` (other projects compiling the same file) |
@@ -10,6 +10,7 @@
 | `UnresolvedIncludes` | `<Compile Include>` values with MSBuild properties the script could not expand — resolve these manually |
 | `LocalCsNotCompiled` | `.cs` files in the folder that are NOT in the `.csproj` — not compiled, ignore them |
 | `References`, `PackagesConfig`, `PackageReferences`, `ProjectReferences` | Inputs for Step 5 |
+| `ExistingHelpers[]` | Every `MimeTypeHelper` / `QueryStringHelper` / `EnvironmentVariableHelper` class in the solution (or in this project, without `-SolutionRoot`): `Name`, `Path`, `Namespace`, `Visibility`, `CompiledIntoThisProject`, `OwnedBy`, `LinkedBy`, `Reusable`, `Reasons[]` — input for `shared-helpers.md` |
 | `ExistingAppSerializers[]` | Every class named like `SerializerCheck.ClassName` in the solution: `Path`, `Namespace`, `Visibility`, `CompiledIntoThisProject`, `OwnedBy`, `LinkedBy`, `Reusable`, `Upgrade`, `Reasons[]` — input for "Placing the Serializer" |
 | `ProjectStyle` | `legacy` (old-style `.csproj` / `packages.config`) or `sdk` |
 | `OnlineReadiness.TargetFramework` / `.Signing` / `.AssemblyVersion` | `Status` + `Note` for each — input for Step 7 |

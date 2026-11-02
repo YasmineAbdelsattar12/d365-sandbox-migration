@@ -123,6 +123,7 @@ Fix in-place with the Edit tool:
 - Serialization: follow `references/serializer-guide.md` exactly
 - HTTP calls: apply hardening from `references/code-patterns.md`
 - System.Web utilities: use replacements from `references/code-patterns.md`
+- **Any fix that needs a helper method** (`MimeTypeHelper`, `QueryStringHelper`, `EnvironmentVariableHelper`): read `references/shared-helpers.md` — one shared file per helper in `Settings.SharedHelperFolder`, reused or linked if it already exists (`ExistingHelpers[]` from the scan), never pasted into the class being fixed or copied per project
 - Add required `using` statements; remove `using` statements for blocked namespaces ONLY if nothing else in the file uses them
 - Ensure DTO classes are `public` (required in partial trust)
 
@@ -171,7 +172,7 @@ Normally replace `.Result` / `.Wait()` on tasks with `.GetAwaiter().GetResult()`
 
 ### Serializer Migration
 
-When any file in scope uses `JavaScriptSerializer`, Newtonsoft.Json, or a wrapper around them: **read `references/serializer-rules.md` and follow it exactly** — which serializer to use (the team's `existing` class or the builtin helper), keeping the JSON identical (`JsonDateStyle.MsAjax` for JavaScriptSerializer replacements), case-sensitive `[DataMember(Name)]`, where the helper lives, and the mandatory "Serializer decisions" section. Code and format details are in `references/serializer-guide.md`.
+When any file in scope uses `JavaScriptSerializer`, Newtonsoft.Json, or a wrapper around them: **read `references/serializer-rules.md` and follow it exactly** — which serializer to use (the team's `existing` class or the builtin helper), keeping the JSON identical (`JsonDateStyle.MsAjax` for JavaScriptSerializer replacements), case-sensitive `[DataMember(Name)]`, where the helper lives, and the mandatory "Shared helper decisions" section. Code and format details are in `references/serializer-guide.md`.
 
 ## Step 5: Clean Project References and NuGet Packages
 
@@ -249,12 +250,12 @@ Skip the online-only rows when the target is on-premises (Step 1). Use `referenc
 
 ## Step 8: Write Summary
 
-Write the summary in chat following `references/summary-template.md` — the sections, their order and their exact shape (Migration Summary block, linked/shared files, changes, accepted findings, blocked APIs left in place, serializer decisions, left as-is on purpose, needs verification, needs decision, projects to rebuild, references, Online Readiness tables, next steps). In report-only mode, "Changes Made" becomes "Would change".
+Write the summary in chat following `references/summary-template.md` — the sections, their order and their exact shape (Migration Summary block, linked/shared files, changes, accepted findings, blocked APIs left in place, shared helper decisions, left as-is on purpose, needs verification, needs decision, projects to rebuild, references, Online Readiness tables, next steps). In report-only mode, "Changes Made" becomes "Would change".
 
 ## Step 9: PDF Report
 
 1. **Decide.** `Settings.ReportEnabled` = `false` → skip this step. `true` → create it at `Settings.ReportLocation`. Otherwise: if the developer chose a report location in Step 1, continue. If they chose **No** or did not answer, ask once more now (AskUserQuestion): "Want a PDF report of this migration for your documentation?" with the same three options. If nobody is there to answer, skip the report.
-2. **Write `report-data.json`** (UTF-8) in the scratchpad or `%TEMP%`, following `references/report-schema.md`. Fill it from the summary you just wrote — same facts, same wording, plain text. Include in `ChangedPaths` every file modified or created in this run (absolute paths, including the `.csproj` and `packages.config`), and set `BaseCommit` (git) or `Baseline` (TFVC / none, e.g. "TFVC workspace version (changeset 1234)") and `Author` from Step 3. Add `AcceptedFindings` and `SerializerDecisions` from the summary.
+2. **Write `report-data.json`** (UTF-8) in the scratchpad or `%TEMP%`, following `references/report-schema.md`. Fill it from the summary you just wrote — same facts, same wording, plain text. Include in `ChangedPaths` every file modified or created in this run (absolute paths, including the `.csproj` and `packages.config`), and set `BaseCommit` (git) or `Baseline` (TFVC / none, e.g. "TFVC workspace version (changeset 1234)") and `Author` from Step 3. Add `AcceptedFindings` and `SerializerDecisions` (all shared helper decisions, serializer included) from the summary.
 3. **Output folder:**
    - Repo: `<repo root>\docs\sandbox-migration`
    - Documents: `[Environment]::GetFolderPath('MyDocuments')` + `\Sandbox Migration Reports`

@@ -14,7 +14,8 @@ One optional file per repository that tells the skill how **this team** works. C
 | `target` | `online` / `onprem` / `ask` | `ask` | Target environment. `online` / `onprem` skip the question at the start of every run |
 | `report.enabled` | `true` / `false` / `ask` | `ask` | PDF report. `true` = always create, `false` = never (and don't ask), `ask` = ask at the start (and once more at the end) |
 | `report.location` | `repo` / `documents` / a folder path / `ask` | `ask` | `repo` = `<repo root>/docs/sandbox-migration`, `documents` = `Documents/Sandbox Migration Reports` |
-| `sharedHelperFolder` | folder path | detected | Where shared helper files (e.g. the serializer) are created and linked from |
+| `sharedHelperFolder` | folder path | detected | Where **every** shared helper file is created and linked from — the serializer and the helpers in `shared-helpers.md` (`MimeTypeHelper`, `QueryStringHelper`, `EnvironmentVariableHelper`) |
+| `sharedHelperNamespace` | namespace | `serializer.namespace`, else the folder's namespace | Namespace for new shared helper files |
 | `serializer.strategy` | `builtin` / `existing` | `builtin` | `builtin` = the skill's own Sandbox-safe helper. `existing` = the team's own class |
 | `serializer.className` | C# name | `AppSerializer` | Class name the skill looks for / creates |
 | `serializer.namespace` | namespace | folder's namespace | `builtin` only — namespace of the created helper |
@@ -72,6 +73,7 @@ Linking a `public` class into many plug-in assemblies is fine as long as no sing
   "target": "online",
   "report": { "enabled": "ask", "location": "repo" },
   "sharedHelperFolder": "Shared/Crm.Common",
+  "sharedHelperNamespace": "Contoso.Crm.Common",
   "serializer": { "strategy": "builtin", "className": "AppSerializer", "namespace": "Contoso.Crm.Common" },
   "skipProjects": ["*.Api", "*.Portal", "*.Tests"],
   "http": { "timeoutSeconds": 90 },

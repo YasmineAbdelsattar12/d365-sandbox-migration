@@ -3,6 +3,7 @@
   "target": "online",
   "report": { "enabled": "ask", "location": "repo" },
   "sharedHelperFolder": "Shared/Crm.Common",
+  "sharedHelperNamespace": "Contoso.Crm.Common",
   "serializer": { "strategy": "builtin", "className": "AppSerializer", "namespace": "Contoso.Crm.Common" },
   "skipProjects": ["*.Api", "*.Portal", "*.Tests"],
   "http": { "timeoutSeconds": 90 },
