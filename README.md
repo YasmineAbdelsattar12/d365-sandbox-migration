@@ -112,6 +112,7 @@ https://github.com/YasmineAbdelsattar12/d365-sandbox-migration
 
 ## Changelog
 
+- **1.7.3** — Report footer: "D365 Sandbox Migration tool created and owned by Yasmine Abdelsattar · © 2026. All rights reserved."
 - **1.7.2** — Report footer shows only the copyright line
 - **1.7.1** — Owner name shown once, in the PDF report footer
 - **1.7.0** — Shared helpers for every fix that needs one, not only the serializer: `MimeTypeHelper`, `QueryStringHelper` (now a `NameValueCollection` exactly like `HttpUtility`, `+` as space) and `EnvironmentVariableHelper`, one file each in `sharedHelperFolder`, reused or linked if they exist; scanner finds and judges existing helpers anywhere in the solution; new `sharedHelperNamespace` setting; "Shared helper decisions" in the summary and PDF
