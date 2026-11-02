@@ -1,104 +1,111 @@
 ---
 name: "sandbox-audit"
-description: "Fully automated Dynamics 365 CRM Sandbox migration tool, including Dataverse Online readiness. Scans all C# files in a plugin/workflow project (including linked and shared-project files), fixes every Sandbox violation in-place, removes blocked NuGet packages and references, builds in Release mode, fixes build errors, checks online readiness (endpoints, .NET version, dependencies, signing, version) and produces a summary. Triggers on: 'sandbox migration', 'audit for sandbox', 'sandbox violation', 'partial trust', 'isolation mode', 'none to sandbox', 'full trust to sandbox', 'plugin sandbox', 'migrate to sandbox', 'migrate plugins to online', 'dataverse online readiness', 'on-prem to online'."
+description: "Fully automated Dynamics 365 CRM Sandbox migration tool for any team or project, including Dataverse Online readiness. Scans all C# files in a plugin/workflow project (including linked and shared-project files), fixes every Sandbox violation in-place, removes blocked references, builds in Release, checks online readiness (endpoints, .NET version, dependencies, signing, version) and produces a summary and optional PDF report. Supports per-repo team settings (sandbox-audit.json), a setup mode, a read-only report mode, git and TFVC. Triggers on: 'sandbox migration', 'audit for sandbox', 'sandbox violation', 'partial trust', 'isolation mode', 'none to sandbox', 'full trust to sandbox', 'plugin sandbox', 'migrate to sandbox', 'migrate plugins to online', 'dataverse online readiness', 'on-prem to online', 'sandbox audit setup'."
 ---
 
 # D365 Sandbox Migration — Automated Fix Tool
 
-Fully automated: scan → safety check → fix → clean references → build → verify → online readiness → summary → PDF report (optional).
+Fully automated: settings → scan → safety check → fix → clean references → build → verify → online readiness → summary → PDF report (optional).
 The developer gets a clean Release build ready to register, plus a clear list of what still blocks go-live on Dataverse Online.
 
-This skill ships a scanner script at `scripts/scan.ps1` inside this skill's base directory (the "Base directory for this skill" path shown when the skill loads). Use it — it is faster and more consistent than grepping by hand.
+Scripts in this skill's base directory (the "Base directory for this skill" path shown when the skill loads) — use them, they are faster and give the same result every time:
 
-## Step 1: Get the Project Path and Target
+| Script | Purpose |
+|---|---|
+| `scripts/scan.ps1` | Resolve every compiled file, find blocked APIs, online-readiness data, team settings, version control. `-ListProjects` lists the whole repo |
+| `scripts/build.ps1` | Find MSBuild on any machine (vswhere), restore, rebuild, list errors, inspect the DLL |
+| `scripts/make-report.ps1` | HTML + PDF report with the code diff |
 
-Order: settle the **project path first** (plain chat), then ask **target + PDF report** together in one AskUserQuestion call.
+Run them with Windows PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File "<skill base dir>\scripts\<script>.ps1" ...` (use `pwsh` if only PowerShell 7 is installed).
 
-**Target environment.** Ask once (AskUserQuestion) unless the developer already said:
-- **Dataverse Online** (default — moving from on-prem to the cloud): run every check, including Step 7 Online Readiness against `references/online-checklist.md`
-- **On-premises, Sandbox only**: skip the online-only checks (framework rule, plug-in packages, internal endpoints become ⚠️ instead of ❌)
+## Step 0: Mode
 
-If nobody answers, use **Dataverse Online** and say so in the summary.
+Read the text the skill was invoked with:
 
-**PDF report.** In the same AskUserQuestion call, ask:
+| Invocation contains | Mode |
+|---|---|
+| `setup`, `configure`, `init` | **Setup mode** — follow `references/modes.md` → Setup Mode. Writes `sandbox-audit.json`; changes no code |
+| `report`, `audit only`, `dry run`, `read-only`, `assess` | **Report-only mode** — follow `references/modes.md` → Report-Only Mode. Analyses and reports; changes no code |
+| anything else (or nothing) | **Migrate mode** — Steps 1–9 below |
 
-> Create a PDF report of this migration at the end (for documentation)?
-- **Yes — save in the repo** (`<repo root>\docs\sandbox-migration\`, can be committed with the migration)
-- **Yes — save in my Documents folder** (`Documents\Sandbox Migration Reports\`)
-- **No**
+A project path in the invocation text is used as the project.
 
-Remember the answer for Step 9. If nobody answers, treat it as **No** for now (Step 9 asks again).
+## Step 1: Project, Target and Report
+
+**Team settings.** The scanner finds `sandbox-audit.json` on its own (project folder or any parent up to the repo root) — see `references/config.md`. Its values replace the questions below:
+
+| Setting | Effect |
+|---|---|
+| `target: online` / `onprem` | Don't ask the target question |
+| `report.enabled: true` + `report.location` | Don't ask; create the report there |
+| `report.enabled: false` | Don't ask, and skip Step 9 entirely |
+| `skipProjects` | Never suggest these; if the developer names one, say it is listed as skipped and ask before continuing |
+
+If settings exist but nothing has been scanned yet, run the scanner (Step 2) first with the chosen project, then apply them. If the scanner reports **settings errors**, show them and stop — they must be fixed in the file first. Show settings **warnings** in one line and continue.
 
 **Project.** If the developer already gave a path, or the current working directory contains exactly one `.csproj`, use it and say so. Otherwise ask **as a normal chat message — NOT with AskUserQuestion** — and wait for the reply:
 
 > What is the path to the D365 plugin or workflow activity project you want to migrate? (The folder containing the `.csproj`, or the `.csproj` itself.)
 
-You may suggest a few likely candidates in the same message (e.g. projects not yet migrated), but the developer answers by typing. **Never create an option named "Other" / "Other (type path)" in AskUserQuestion** — the tool adds its own free-text choice, and a hand-made "Other" is just a button with no text box, so the path never arrives.
+To suggest candidates in the same message, run `scan.ps1 -ListProjects -SolutionRoot "<repo root>"` and list a few projects whose `Kind` is not `Other`, that are not `Skipped`, and have no full-trust `Hint` — never guess from folder names. The developer answers by typing. **Never create an option named "Other" / "Other (type path)" in AskUserQuestion** — the tool adds its own free-text choice, and a hand-made "Other" is just a button with no text box.
 
-Accept a folder path or a `.csproj` file path. If the developer gives a `.sln` path, find all `.csproj` files in the solution directory and ask which project(s) to migrate (AskUserQuestion with the real project names as options is fine here).
+Accept a folder path or a `.csproj` file path. If the developer gives a `.sln` path, find all `.csproj` files in the solution directory and ask which project(s) to migrate (AskUserQuestion with the real project names as options is fine here). Confirm the path exists and contains a `.csproj` file before proceeding.
 
-Confirm the path exists and contains a `.csproj` file before proceeding.
+**Target and report** — ask what the settings don't answer, together in one AskUserQuestion call:
+
+- Target: **Dataverse Online** (default — moving from on-prem to the cloud: every check, including Step 7 against `references/online-checklist.md`) or **On-premises, Sandbox only** (skips online-only checks; internal endpoints become ⚠️ instead of ❌). If nobody answers, use Dataverse Online and say so in the summary.
+- Report: "Create a PDF report of this migration at the end (for documentation)?" — **Yes — save in the repo** (`<repo root>\docs\sandbox-migration\`) / **Yes — save in my Documents folder** (`Documents\Sandbox Migration Reports\`) / **No**. Remember the answer for Step 9; no answer = No for now (Step 9 asks again).
+
+In the same chat, reuse earlier answers instead of asking again, and say which ones you reused.
 
 ## Step 2: Run the Scanner
 
-1. Determine the **solution root** — the folder used to find other projects that link the same shared files:
-   - The git repository root (`git -C "<project folder>" rev-parse --show-toplevel`), or
-   - The folder containing the `.sln`, or
-   - If neither exists, omit `-SolutionRoot`.
-
-2. Run (Windows PowerShell 5.1+ or PowerShell 7):
+1. **Solution root** — used to find settings, other projects that link the same files, and existing serializers: the git root (`git -C "<project folder>" rev-parse --show-toplevel`), else the TFVC workspace root, else the folder containing the `.sln`, else omit `-SolutionRoot`.
+2. Run:
    ```
    powershell -NoProfile -ExecutionPolicy Bypass -File "<skill base dir>\scripts\scan.ps1" -Project "<path to .csproj>" -SolutionRoot "<solution root>" -OutFile "<scratchpad or %TEMP%>\sandbox-scan-<Project>.json"
    ```
-   (Use `pwsh` instead of `powershell` if only PowerShell 7 is installed.)
+3. The console output gives counts and one line per hit. The JSON file has everything — every field is described in `references/scanner-output.md`. The ones used most: `Settings` (team settings, `Errors`, `Warnings`), `SerializerCheck`, `VersionControl`, `Files[]` (with `Source` and `SharedBy`), `Hits[]` (with `Member`, `InDebug`, `Accepted`), `ExistingAppSerializers[]`, and `OnlineReadiness` (`TargetFramework`, `Signing`, `AssemblyVersion`, `EntryPoints`, `DependencyCandidates`, `HttpCalls`, `UrlLiterals`, `LoopRisks`).
 
-3. The console output gives counts and one line per hit. The JSON file has everything:
+   Severity meanings: **Blocked** = fails in Sandbox if executed · **Avoid** = unsupported or unreliable in plug-ins · **Review** = depends on usage, read in context · **Harden** = allowed, apply HTTP hardening · **Using** = namespace import only. Counts exclude **Accepted** findings.
 
-   | JSON field | Meaning |
-   |---|---|
-   | `Files[]` | Every compiled `.cs` file: `Source` = `local` / `linked` / `shared`, `Exists`, `Hits`, `Types`, `SharedBy` (other projects compiling the same file) |
-   | `Hits[]` | `File`, `Line`, `Category`, `Severity`, `Api`, `Member` (containing method), `InDebug`, `Text` |
-   | `UnresolvedIncludes` | `<Compile Include>` values with MSBuild properties the script could not expand — resolve these manually |
-   | `LocalCsNotCompiled` | `.cs` files in the folder that are NOT in the `.csproj` — not compiled, ignore them |
-   | `References`, `PackagesConfig`, `PackageReferences`, `ProjectReferences` | Inputs for Step 5 |
-   | `ExistingAppSerializers[]` | Every `class AppSerializer` in the solution: `Path`, `Namespace`, `Visibility`, `CompiledIntoThisProject`, `OwnedBy` (project whose own DLL it is part of), `LinkedBy`, `Reusable`, `Upgrade`, `Reasons[]` — input for "Placing AppSerializer" |
-   | `ProjectStyle` | `legacy` (old-style `.csproj` / `packages.config`) or `sdk` |
-   | `OnlineReadiness.TargetFramework` / `.Signing` / `.AssemblyVersion` | `Status` + `Note` for each — input for Step 7 |
-   | `OnlineReadiness.EntryPoints` | Plug-in and workflow-activity classes (resolved through custom base classes). `ContainsWorkflowActivities` decides whether plug-in packages are possible |
-   | `OnlineReadiness.DependencyCandidates` | Non-framework references / packages / project references — confirmed against the compiled DLL in Step 6 |
-   | `OnlineReadiness.HttpCalls[]` | Every HTTP call: `Call`, `UrlExpr`, best-effort `UrlSource` (`Hardcoded` / `Configuration` / `WorkflowInput` / `StepConfig` / `Parameter` / `Relative` / `Unknown`), `UrlKey`, `Url`, `UrlClass`, `InLoop` |
-   | `OnlineReadiness.UrlLiterals[]` | Every hard-coded URL with `Class`: `Blocked` (IP / localhost / protocol), `Internal` (single-label host, `.local`, …), `Avoid` (port), `Review` (plain http), `LooksPublic`, `Unknown` |
-   | `OnlineReadiness.LoopRisks[]` | Organization-service or HTTP calls inside loops (2-minute limit risk) |
-
-   Severity meanings: **Blocked** = fails in Sandbox if executed · **Avoid** = unsupported or unreliable in plug-ins · **Review** = depends on usage, read in context · **Harden** = allowed, apply HTTP hardening · **Using** = namespace import only.
-
-4. Report discovery to the developer: "Found X compiled .cs files (Y local, Z linked, W shared) — N hits in M files (B blocked, R review, H HTTP calls)." Then **list every linked and shared file explicitly**. Linked files are the most common source of missed violations because they live outside the project folder.
-
+4. Report discovery to the developer: "Found X compiled .cs files (Y local, Z linked, W shared) — N findings in M files (B blocked, R review, H HTTP calls, A accepted by the team)." Then **list every linked and shared file explicitly**. Linked files are the most common source of missed violations because they live outside the project folder.
 5. If `Files[].Exists` is false for any file, report it — the build will fail on it anyway.
 
-**Fallback (scanner cannot run):** Parse the `.csproj` yourself. Resolve every `<Compile Include>` relative to the `.csproj` folder (entries with `<Link>` or `..` are linked files), every `<Import Project="*.projitems">` (resolve its `<Compile>` entries relative to the `.projitems` folder, `$(MSBuildThisFileDirectory)` = that folder), and for SDK-style projects all `**/*.cs` except `bin/`/`obj/` and `<Compile Remove>`. Then search all of them for the patterns in `references/blocked-apis.md`. On Windows, prefer PowerShell `[xml]` parsing over `grep`/`sed` pipelines — they are slow on large trees.
+**Fallback (scanner cannot run):** Parse the `.csproj` yourself. Resolve every `<Compile Include>` relative to the `.csproj` folder (entries with `<Link>` or `..` are linked files), every `<Import Project="*.projitems">` (resolve its `<Compile>` entries relative to the `.projitems` folder, `$(MSBuildThisFileDirectory)` = that folder), and for SDK-style projects all `**/*.cs` except `bin/`/`obj/` and `<Compile Remove>`. Then search all of them for the patterns in `references/blocked-apis.md`. Read `sandbox-audit.json` yourself if it exists. On Windows, prefer PowerShell `[xml]` parsing over `grep`/`sed` pipelines — they are slow on large trees.
 
 ### Scope rule
 
 Every file in `Files[]` is compiled into the assembly and runs in Sandbox — it is **in scope**, whether local, linked or shared. Do NOT skip a file because it lives outside the project folder. The only files to skip are those clearly not part of plugin execution: unit tests (`[TestClass]`, `[Fact]`), API controllers (`ApiController`, `ControllerBase`), console `Main()` entry points.
 
-## Step 3: Safety Check (git)
+### Accepted findings
 
-Before editing anything:
+A finding with `Accepted` set was reviewed and accepted by the team (in `sandbox-audit.json` → `acceptedFindings`, or an inline `// sandbox-ignore: reason` comment). Do **not** fix it and do not count it as a violation; list it under **"Accepted findings"** in the summary with its reason. Never add accepted findings yourself — only when the developer asks, and then always with a reason and a date (in `sandbox-audit.json`, or as an inline comment if they prefer).
 
-1. Run `git -C "<project folder>" status --porcelain` for the repository.
+## Step 3: Safety Check (version control)
+
+Before editing anything, use `VersionControl.Type` from the scan:
+
+**git**
+1. Run `git -C "<project folder>" status --porcelain`.
 2. Check whether any file the migration may touch (the `.csproj`, `packages.config`, files with hits) already has uncommitted changes, and whether other uncommitted changes exist elsewhere in the repo (e.g. from migrating a previous project).
-3. If there are uncommitted changes, ask with AskUserQuestion:
-   - **Commit first** — the developer commits, then says continue (recommended, so each project's migration is its own reviewable commit)
-   - **New branch** — run `git switch -c sandbox/<ProjectName>` and continue
-   - **Continue anyway**
-4. Never commit, stash or discard on the developer's behalf unless they ask.
-5. Record the starting point for the report: `git -C "<project folder>" rev-parse --short HEAD` (**base commit**, after any commit the developer made in this step) and `git config user.name` (**author**).
-6. If the folder is not a git repository, or nobody answers, continue and note it in the summary ("Changes were made without a clean git baseline").
+3. If there are uncommitted changes, ask with AskUserQuestion: **Commit first** (recommended, so each project's migration is its own reviewable commit) / **New branch** (`git switch -c sandbox/<ProjectName>`, then continue) / **Continue anyway**.
+4. Record for the report: `git -C "<project folder>" rev-parse --short HEAD` (**base commit**, after any commit made in this step) and `git config user.name` (**author**).
+
+**tfvc** (Team Foundation Version Control)
+1. Find `tf.exe`: `& "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -find "Common7\IDE\CommonExtensions\Microsoft\TeamFoundation\Team Explorer\TF.exe"`.
+2. Run `tf status "<project folder>" /recursive /noprompt` (and for the folders of linked files with hits). Pending changes → ask: **Check in first** (recommended) / **Shelve first** (`tf shelve`, then continue) / **Continue anyway**.
+3. Record for the report: baseline `"TFVC workspace version"` plus the latest changeset if available (`tf history "<project folder>" /recursive /stopafter:1 /noprompt /format:brief`), and the author (`$env:USERNAME` or the TFS display name).
+4. Remind the developer that files edited outside Visual Studio may need **"Detect local changes"** / **Promote** in Team Explorer (local workspaces) before they show up as pending changes.
+
+**none** (no version control found)
+- Say so, recommend copying the project folder (and linked helper folders) before continuing, and ask: **Continue** / **Stop**. Note "no version-control baseline" in the summary.
+
+Never commit, check in, stash, shelve or discard on the developer's behalf unless they ask.
 
 ## Step 4: Analyse and Fix
 
-Read **every file that has a Blocked, Review or Harden hit** — the whole file, using its absolute path. Files with zero hits do not need to be read, except:
+Read **every file that has a Blocked, Avoid, Review or Harden hit that is not Accepted** — the whole file, using its absolute path. Files with zero hits do not need to be read, except:
 - DTO / model classes passed to a serializer you are replacing (they need `[DataContract]` / `[DataMember]`)
 - Classes containing the callers you need to trace for a hit
 
@@ -150,7 +157,7 @@ Applies to individual METHODS, never to whole files.
 
 For every outbound call (`Harden` hits), ensure:
 1. `ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;` before the call
-2. Timeout ≤ 90 seconds (`client.Timeout` / `request.Timeout`)
+2. Timeout = `Settings.HttpTimeoutSeconds` (default 90; never above 110 — `client.Timeout` / `request.Timeout`)
 3. KeepAlive disabled — `request.KeepAlive = false;` / `client.DefaultRequestHeaders.ConnectionClose = true;` (Microsoft guidance for sandboxed calls)
 4. `.GetAwaiter().GetResult()` instead of `.Result` — except as below
 5. `InvalidPluginExecutionException` instead of generic `Exception` / `InvalidOperationException`
@@ -164,35 +171,7 @@ Normally replace `.Result` / `.Wait()` on tasks with `.GetAwaiter().GetResult()`
 
 ### Serializer Migration
 
-When a file uses `Newtonsoft.Json` or `JavaScriptSerializer`:
-
-1. Replace, keeping the wire format identical (see `references/serializer-guide.md` → "Two date styles"):
-   - `JsonConvert.SerializeObject(x)` / `DeserializeObject<T>(json)` → `AppSerializer.Serialize(x)` / `AppSerializer.Deserialize<T>(json)` (ISO dates, like Newtonsoft)
-   - `JavaScriptSerializer.Serialize(x)` / `Deserialize<T>(json)` → `AppSerializer.Serialize(x, JsonDateStyle.MsAjax)` / `AppSerializer.Deserialize<T>(json, JsonDateStyle.MsAjax)` (`\/Date(...)\/` dates and `"null"`, like JavaScriptSerializer). **Never** use the ISO default for a JavaScriptSerializer replacement.
-   - Calls through a wrapper that used one of these internally (e.g. `AppSerializer.Instance.Serialize(x)` from a separate helper DLL) → the same rule, based on which serializer the wrapper used.
-2. Replace `[JsonProperty("x")]` → `[DataMember(Name = "x")]`
-3. Remove `[JsonIgnore]` / `[ScriptIgnore]` (with `[DataContract]` on the class, unannotated members are excluded)
-4. Add `[DataContract]` to the class and `[DataMember]` to EVERY member that should serialize
-5. **Choose `Name` values carefully** — `DataContractJsonSerializer` is case-sensitive; the old serializers were not. Follow the table in `references/serializer-guide.md` → "Property Names Are Case-Sensitive". For any **deserialized** class whose real JSON casing you could not confirm, list it under **"Needs verification"**.
-6. **DateTime members**: with the style rule in step 1 the format stays the same. Only a class with **local** `DateTime` members sent with `MsAjax` to a non-.NET receiver goes under **"Needs verification"** (the timestamp gets an offset suffix — see serializer-guide → "DateTime Handling").
-7. Replace `JObject.Parse` → typed DTO + `AppSerializer.Deserialize<T>`
-8. Get `AppSerializer` from **Placing AppSerializer** below — never write a new copy without checking.
-
-### Placing AppSerializer
-
-Check `ExistingAppSerializers` from the scan (or search the solution for `class AppSerializer` if the scanner could not run). A class is only **reusable** (`Reusable: true`) when it can be linked as one self-contained source file: static `Serialize<T>` / `Deserialize<T>` API, only `System.*` dependencies, no interface/base class, and no `JavaScriptSerializer` / Newtonsoft inside. Classes with the same name but a different design — typically a `public` instance class with `AppSerializer.Instance` and an `IJsonSerializer` interface in its own helper **project** — are **not** reusable for plug-ins: referencing that DLL would be a runtime dependency (❌ online for workflow activities), and its interface can't be linked on its own. **Never modify such a class** — it belongs to the projects that own it (often full-trust API/Portal code).
-
-1. **A reusable one is already compiled into this project** (`CompiledIntoThisProject`) → use it. If `Upgrade` is true, replace its content with the current version from `references/serializer-guide.md` (same API plus `JsonDateStyle`), keep its namespace, and list its `LinkedBy` projects under "Projects to rebuild".
-2. **A reusable one exists elsewhere** → add it to this `.csproj` as a linked file, using the same `<Link>` folder convention as the project's other linked files:
-   ```xml
-   <Compile Include="..\..\Helper\LinkDev.Common.Crm.Utilities\AppSerializer.cs">
-     <Link>Utilities\AppSerializer.cs</Link>
-   </Compile>
-   ```
-   If it is `public`, and this assembly references another assembly that also compiles it, change it to `internal` to avoid `CS0433` (list affected projects). Apply the `Upgrade` as in 1.
-3. **No reusable one exists** → if the project already links files from a shared helper folder (most `linked` entries share a parent folder, e.g. `Helper\...Utilities\`), create `AppSerializer.cs` there using the `internal` version from `references/serializer-guide.md`, with that folder's namespace, and link it. Only if the project has no linked files at all, create it in the project folder.
-4. Add the matching `using <namespace>;` to every file that calls it. If a non-reusable `AppSerializer` in another namespace is also visible in that file, use the fully-qualified name to avoid ambiguity.
-5. **Always explain the choice** in the summary section **"Serializer decisions"**: which `AppSerializer` was used (path, namespace, new / linked / upgraded) and, for every other `AppSerializer` in the solution, one line on why it was not used — taken from its `Reasons`. Developers see several classes with the same name in Solution Explorer, so this must never be silent.
+When any file in scope uses `JavaScriptSerializer`, Newtonsoft.Json, or a wrapper around them: **read `references/serializer-rules.md` and follow it exactly** — which serializer to use (the team's `existing` class or the builtin helper), keeping the JSON identical (`JsonDateStyle.MsAjax` for JavaScriptSerializer replacements), case-sensitive `[DataMember(Name)]`, where the helper lives, and the mandatory "Serializer decisions" section. Code and format details are in `references/serializer-guide.md`.
 
 ## Step 5: Clean Project References and NuGet Packages
 
@@ -226,15 +205,12 @@ If packages were removed from `packages.config`, also remove the corresponding `
 
 ## Step 6: Build in Release Mode
 
-1. Locate `MSBuild.exe` or use `dotnet build`:
+1. Build with the bundled script — it finds MSBuild on any machine (vswhere → PATH → dotnet for SDK-style), restores NuGet packages (including `packages.config`), rebuilds and inspects the DLL:
    ```
-   dotnet build "ProjectName.csproj" --configuration Release
+   powershell -NoProfile -ExecutionPolicy Bypass -File "<skill base dir>\scripts\build.ps1" -Project "<path to .csproj>" -OutFile "<scratchpad or %TEMP%>\sandbox-build-<Project>.json"
    ```
-   If `dotnet build` is not available or the project uses old-style `.csproj`, try:
-   ```
-   msbuild "ProjectName.csproj" /p:Configuration=Release /t:Rebuild
-   ```
-2. If the build **succeeds**: continue with item 5 below, then Step 7.
+   JSON: `Success`, `Builder`, `Errors[]` (`File`, `Line`, `Code`, `Message`), `WarningCount`, `Dll` (`Path`, `Size`, `WithinSizeLimit`, `Version`, `PublicKeyToken`, `Signed`, `References[]`, `RuntimeDependencies[]`), `LogTail`.
+2. Error `NO-MSBUILD` / `NEEDS-MSBUILD` → tell the developer to install Visual Studio or **Build Tools for Visual Studio** (".NET desktop build tools"), and stop the build step (the code changes stay; say the build was not verified).
 3. If the build **fails**: fix each error —
    - **Missing type/namespace** after removing a reference → a usage was missed; fix the code or restore the reference
    - **Missing `using`** → add it
@@ -243,16 +219,11 @@ If packages were removed from `packages.config`, also remove the corresponding `
    - **Type not public** → make the DTO `public`
    - **Missing parameterless constructor** → add `public ClassName() { }`
 4. Rebuild after fixes, max 5 attempts. If still failing, stop and report the remaining errors.
-5. **Inspect the compiled DLL** (use Windows PowerShell `powershell` — `ReflectionOnlyLoadFrom` is not available in PowerShell 7):
-   ```powershell
-   $dll = (Resolve-Path "bin\Release\<Assembly>.dll").Path
-   $n = [System.Reflection.AssemblyName]::GetAssemblyName($dll)
-   "Version: $($n.Version)  PublicKeyToken: $(-join ($n.GetPublicKeyToken() | % { $_.ToString('x2') }))  Size: $((Get-Item $dll).Length) bytes"
-   [System.Reflection.Assembly]::ReflectionOnlyLoadFrom($dll).GetReferencedAssemblies() | % { "$($_.Name) $($_.Version)" }
-   ```
-   - **Runtime dependencies** = referenced assemblies other than `mscorlib`, `netstandard`, `System*`, `Microsoft.CSharp`, `Microsoft.Xrm.Sdk*`, `Microsoft.Crm.Sdk.Proxy`. This is the real list — `DependencyCandidates` from the scan are only `.csproj` entries.
-   - **Signed** = the public key token is not empty.
-   - **Version** = compare major.minor with the version at the last commit (`git show HEAD:<path of AssemblyInfo.cs or .csproj>`). If major or minor changed, warn: the Plugin Registration Tool treats it as a different assembly, so the in-place update fails or steps/workflows stay bound to the old one.
+5. **DLL checks** from `Dll` in the build JSON (or `build.ps1 -InspectOnly -Dll <path>` when the team builds another way):
+   - **Runtime dependencies** = `Dll.RuntimeDependencies` (references other than .NET Framework and the CRM SDK). This is the real list — `DependencyCandidates` from the scan are only `.csproj` entries.
+   - **Signed** = `Dll.Signed`.
+   - **Size** = `Dll.WithinSizeLimit` (16 MB).
+   - **Version** = compare major.minor of `Dll.Version` with the version at the baseline (git: `git show <base commit>:<path of AssemblyInfo.cs or .csproj>`; TFVC: `tf view "<path>" /version:T` or the scan's `AssemblyVersion` taken before editing). If major or minor changed, warn: the Plugin Registration Tool treats it as a different assembly, so the in-place update fails or steps/workflows stay bound to the old one.
 
 ## Step 7: Online Readiness
 
@@ -278,108 +249,23 @@ Skip the online-only rows when the target is on-premises (Step 1). Use `referenc
 
 ## Step 8: Write Summary
 
-### Migration Summary
-
-```
-Project: [Project Name]
-Assembly: [Assembly Name]
-Total .cs files scanned: X (Y local, Z linked, W shared)
-Files modified: N
-New files: [list, or none]
-Files clean (no changes): M
-Files skipped (full-trust only): K
-Build result: ✅ Success / ❌ Failed (with errors)
-Output: bin\Release\[Assembly].dll, [size] (limit 16 MB)
-Git baseline: clean / uncommitted changes present / not a git repo
-Target: Dataverse Online / On-premises Sandbox
-Online readiness: ✅ Ready / ⚠️ Needs work (N items) / ❌ Blocked (N items)
-```
-
-### Linked & Shared Files Scanned
-
-List every linked/shared file with **[LINKED]** / **[SHARED]**, its status, and `SharedBy` count when known.
-
-### Changes Made
-
-For each modified file: path (with **[LINKED]** / **[SHARED]** when applicable), what changed, lines affected.
-
-### Blocked APIs Left in Place
-
-Table: location · blocked API · evidence it never runs in this assembly.
-
-### Serializer Decisions
-
-Only when serialization was touched. Example:
-
-```
-Used:     Helper\LinkDev.Common.Crm.Utilities\AppSerializer.cs (LinkDev.Common.Crm.Utilities) — linked, upgraded to JsonDateStyle version
-Not used: Helper\LinkDev.Common.Utilities\AppSerializer.cs (LinkDev.Common.Utilities) — instance/IJsonSerializer design in its own DLL,
-          still uses JavaScriptSerializer. Left unchanged (owned by LinkDev.Common.Utilities).
-Calls:    3 JavaScriptSerializer calls → AppSerializer.Serialize(x, JsonDateStyle.MsAjax) — JSON unchanged
-```
-
-### Left As-Is On Purpose
-
-E.g. `.Result` kept because of an `AggregateException` catch — with the one-line change on offer.
-
-### Needs Verification
-
-Deserialized DTOs whose JSON casing was not confirmed; serialized classes whose DateTime format changed. Say exactly what to check.
-
-### Needs Decision
-
-Shared-file violations not edited because of their reach (rule 4 of the Shared File Rule).
-
-### Projects to Rebuild
-
-Every project in `SharedBy` of any shared file that was edited — they all compile the changed file.
-
-### References & Packages
-
-Removed / kept (with reason) / added.
-
-### Online Readiness
-
-From Step 7, in this shape:
-
-```
-Online Readiness: ⚠️ Needs work (2 items)
-
-Target framework:  ✅ .NET 4.6.2
-Signed:            ✅ <key file>
-Version:           ✅ 1.0.0.0 → 1.0.0.0 (in-place update OK)
-Dependencies:      ✅ none (Contracts compiled in via linked files)
-Size:              ✅ 277 KB (limit 16 MB)
-```
-
-| # | Class / method | Call | URL comes from | Status |
-|---|---|---|---|---|
-| 1 | MigrateNotesToDocuments.Execute | POST | Config record `DocumentsApiUrl` | ⚠️ Confirm it's a public HTTPS DNS name |
-| 2 | … | … | Hard-coded `http://10.1.2.15/api` | ❌ IP address — not allowed online |
-
-Then **calls inside loops** (⚠️, report only) and **What your team must do before go-live** (numbered, most serious first).
-
-### Next Steps for Developer
-
-1. **If a file was added to the `.csproj`** (e.g. `AppSerializer.cs` linked or created): in Visual Studio, right-click the project → **Reload Project** (or reopen the solution) — Solution Explorer does not show files added outside VS until it reloads.
-2. Review the diff and commit this project's migration as its own commit.
-3. Open **XrmToolBox → Plugin Registration Tool** (connected to the target environment), update the assembly with the `.dll` from `bin\Release\`, set Isolation Mode to **Sandbox** (online: always Sandbox), and confirm all steps are still registered.
-4. Online: enable the **Plug-in Trace Log** (Settings → Administration → System Settings → Customization) for the first test runs — it replaces Event Log / file logging.
-5. Rebuild and re-register every project under "Projects to rebuild".
-6. Test: [list key scenarios based on what changed — every HTTP call, every serialized payload, every "Needs verification" item].
+Write the summary in chat following `references/summary-template.md` — the sections, their order and their exact shape (Migration Summary block, linked/shared files, changes, accepted findings, blocked APIs left in place, serializer decisions, left as-is on purpose, needs verification, needs decision, projects to rebuild, references, Online Readiness tables, next steps). In report-only mode, "Changes Made" becomes "Would change".
 
 ## Step 9: PDF Report
 
-1. **Decide.** If the developer chose a report location in Step 1, continue. If they chose **No** or did not answer, ask once more now (AskUserQuestion): "Want a PDF report of this migration for your documentation?" with the same three options. If nobody is there to answer, skip the report.
-2. **Write `report-data.json`** (UTF-8) in the scratchpad or `%TEMP%`, following `references/report-schema.md`. Fill it from the summary you just wrote — same facts, same wording, plain text. Include in `ChangedPaths` every file modified or created in this run (absolute paths, including the `.csproj` and `packages.config`), and set `BaseCommit` / `Author` from Step 3.
+1. **Decide.** `Settings.ReportEnabled` = `false` → skip this step. `true` → create it at `Settings.ReportLocation`. Otherwise: if the developer chose a report location in Step 1, continue. If they chose **No** or did not answer, ask once more now (AskUserQuestion): "Want a PDF report of this migration for your documentation?" with the same three options. If nobody is there to answer, skip the report.
+2. **Write `report-data.json`** (UTF-8) in the scratchpad or `%TEMP%`, following `references/report-schema.md`. Fill it from the summary you just wrote — same facts, same wording, plain text. Include in `ChangedPaths` every file modified or created in this run (absolute paths, including the `.csproj` and `packages.config`), and set `BaseCommit` (git) or `Baseline` (TFVC / none, e.g. "TFVC workspace version (changeset 1234)") and `Author` from Step 3. Add `AcceptedFindings` and `SerializerDecisions` from the summary.
 3. **Output folder:**
    - Repo: `<repo root>\docs\sandbox-migration`
    - Documents: `[Environment]::GetFolderPath('MyDocuments')` + `\Sandbox Migration Reports`
+   - A path from `Settings.ReportLocation`: that folder (relative to the settings file)
 4. **Run:**
    ```
    powershell -NoProfile -ExecutionPolicy Bypass -File "<skill base dir>\scripts\make-report.ps1" -Data "<report-data.json>" -Scan "<scanner JSON from Step 2>" -Repo "<repo root>" -OutDir "<output folder>" -Open
    ```
-   The script builds an HTML report with the real code diff since the base commit and converts it to PDF with Microsoft Edge (or Chrome) in headless mode, then opens it. Omit `-Repo` if the project is not in git.
+   The script builds an HTML report with the real code diff since the base commit and converts it to PDF with Microsoft Edge (or Chrome) in headless mode, then opens it.
+   - **TFVC**: omit `-Repo`; first write the diff with `tf diff <every changed path> /format:unified /noprompt > "<scratchpad>\changes.diff"` and pass `-DiffFile "<that file>"`. New files that are not yet added to TFVC: run `tf add` only if the developer agrees, otherwise list them under "New files" (their content is not in the diff).
+   - **No version control**: omit `-Repo` and `-DiffFile`; the report has no diff section.
 5. **Tell the developer** the PDF path in one line. If the script says the PDF was not created (no Edge/Chrome), give the HTML path and say: open it and use **Print → Save as PDF**. If it was saved in the repo, mention it will show up in Git Changes and can be committed with the migration.
 
 ## What NOT to Change

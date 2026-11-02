@@ -8,19 +8,20 @@ Write the file as **UTF-8**. Every field is optional; empty sections are left ou
 
 ```json
 {
-  "Project": "LinkDev.Common.Crm.Cs.Documents",
-  "Assembly": "LinkDev.Common.Crm.Cs.Documents.dll",
+  "Project": "Contoso.Crm.Plugins.Documents",
+  "Assembly": "Contoso.Crm.Plugins.Documents.dll",
   "Target": "Dataverse Online",
   "SkillVersion": "1.4.0",
   "Author": "<git config user.name>",
-  "BaseCommit": "<short hash recorded in Step 3>",
+  "BaseCommit": "<git: short hash recorded in Step 3>",
+  "Baseline": "<TFVC / no version control: e.g. TFVC workspace version (changeset 1234)>",
 
   "Summary": {
     "FilesScanned": 78, "Local": 16, "Linked": 62, "Shared": 0,
     "FilesModified": 5,
-    "NewFiles": ["Helper\\LinkDev.Common.Crm.Utilities\\AppSerializer.cs"],
+    "NewFiles": ["Shared\\Crm.Common\\AppSerializer.cs"],
     "BuildResult": "Success",
-    "DllPath": "bin\\Release\\LinkDev.Common.Crm.Cs.Documents.dll",
+    "DllPath": "bin\\Release\\Contoso.Crm.Plugins.Documents.dll",
     "DllSize": "277 KB (limit 16 MB)",
     "DllVersion": "1.0.0.0",
     "PublicKeyToken": "a1b2c3d4e5f60718",
@@ -37,16 +38,18 @@ Write the file as **UTF-8**. Every field is optional; empty sections are left ou
   ],
 
   "SerializerDecisions": [
-    "Used: Helper\\LinkDev.Common.Crm.Utilities\\AppSerializer.cs (LinkDev.Common.Crm.Utilities) - linked, upgraded to the JsonDateStyle version",
-    "Not used: Helper\\LinkDev.Common.Utilities\\AppSerializer.cs - instance/IJsonSerializer design in its own DLL, still uses JavaScriptSerializer; left unchanged",
+    "Used: Shared\\Crm.Common\\AppSerializer.cs (Contoso.Crm.Common) - linked, upgraded to the JsonDateStyle version",
+    "Not used: Shared\\Contoso.Common.Utilities\\AppSerializer.cs - instance/IJsonSerializer design in its own DLL, still uses JavaScriptSerializer; left unchanged",
     "3 JavaScriptSerializer calls -> AppSerializer.Serialize(x, JsonDateStyle.MsAjax) - JSON output unchanged"
   ],
+
+  "AcceptedFindings": ["Logger.cs:13 EventLog - Never called from plug-ins, reviewed 2026-11-02 (sandbox-audit.json)"],
 
   "LeftInPlace": [ { "Location": "Tools.cs:694 GetMimeType", "Api": "Registry", "Evidence": "No call sites in the 78 compiled files" } ],
   "LeftOnPurpose": [".Result kept in MigrateFileLocations.cs:120 - code catches AggregateException"],
   "NeedsVerification": ["CreateFileLocationsModel: DateTime members now serialize as ISO 8601 - confirm the API accepts it"],
   "NeedsDecision": ["Logger.cs EventLog - linked by 64 projects, call path unclear"],
-  "ProjectsToRebuild": ["LinkDev.Common.Crm.Cs.StageConfiguration"],
+  "ProjectsToRebuild": ["Contoso.Crm.Plugins.Stages"],
 
   "References": {
     "Removed": ["System.Web", "System.DirectoryServices"],
@@ -59,7 +62,7 @@ Write the file as **UTF-8**. Every field is optional; empty sections are left ou
   "Online": {
     "Checks": [
       { "Name": "Target framework", "Status": "ok", "Detail": ".NET 4.6.2" },
-      { "Name": "Signed", "Status": "ok", "Detail": "LinkDev.Gea.Crm.SigningKey.snk" },
+      { "Name": "Signed", "Status": "ok", "Detail": "Contoso.Crm.snk" },
       { "Name": "Version", "Status": "ok", "Detail": "1.0.0.0 -> 1.0.0.0 (in-place update OK)" },
       { "Name": "Size", "Status": "ok", "Detail": "277 KB (limit 16 MB)" }
     ],
@@ -73,8 +76,10 @@ Write the file as **UTF-8**. Every field is optional; empty sections are left ou
   "NextSteps": ["Reload the project in Visual Studio", "Commit this migration", "Update the assembly in the Plugin Registration Tool (Sandbox)"],
   "Tests": ["Run MigrateNotesToDocuments on a record with 3 notes and confirm the POST succeeds"],
 
-  "ChangedPaths": ["D:\\Gea\\Crm\\Cs\\LinkDev.Common.Crm.Cs.Documents\\MigrateNotesToDocuments.cs", "..."]
+  "ChangedPaths": ["D:\\Repo\\Crm\\Contoso.Crm.Plugins.Documents\\MigrateNotesToDocuments.cs", "..."]
 }
 ```
 
-`ChangedPaths` — every file modified **or created** during the run, absolute paths: `.cs` files, linked files, the `.csproj`, `packages.config`. New (untracked) files are shown in full as added.
+`ChangedPaths` (git) — every file modified **or created** during the run, absolute paths: `.cs` files, linked files, the `.csproj`, `packages.config`. New (untracked) files are shown in full as added.
+
+`Baseline` — free text shown as "Compared with ..." when there is no git commit (TFVC, or no version control). For TFVC, also pass the unified diff file to `make-report.ps1 -DiffFile`.

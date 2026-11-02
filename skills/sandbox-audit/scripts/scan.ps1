@@ -19,16 +19,27 @@
     The scanner only FINDS candidates. Claude still reads each hit in context,
     verifies callers, and decides what to fix.
 
+    6. Team settings: reads sandbox-audit.json (found next to the project or in any parent
+       folder up to -SolutionRoot, or given with -Config) - accepted findings, serializer
+       strategy, shared helper folder, projects to skip, defaults. Inline
+       "// sandbox-ignore: reason" comments (same line or line above) also accept a finding.
+    7. -ListProjects: lists every project under -SolutionRoot (plug-ins / workflow activities /
+       other, framework, shared folders it links from) - used by setup mode.
+
     Compatible with Windows PowerShell 5.1 and PowerShell 7+.
 
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File scan.ps1 -Project "D:\Repo\Cs\My.Plugin" -SolutionRoot "D:\Repo" -OutFile "$env:TEMP\scan.json"
+.EXAMPLE
+    powershell -NoProfile -ExecutionPolicy Bypass -File scan.ps1 -ListProjects -SolutionRoot "D:\Repo" -OutFile "$env:TEMP\projects.json"
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][string]$Project,      # .csproj path or folder containing one
+    [string]$Project,                                    # .csproj path or folder containing one (not needed with -ListProjects)
     [string]$OutFile,                                    # JSON output path (default: %TEMP%\sandbox-scan-<project>.json)
-    [string]$SolutionRoot                                # optional: folder to search for other projects / AppSerializer
+    [string]$SolutionRoot,                               # optional: folder to search for other projects / serializers
+    [string]$Config,                                     # optional: explicit path to sandbox-audit.json
+    [switch]$ListProjects                                # list all projects under -SolutionRoot and exit
 )
 
 $ErrorActionPreference = 'Stop'
@@ -39,7 +50,13 @@ $cmp = if ($isWin) { [StringComparer]::OrdinalIgnoreCase } else { [StringCompare
 $excludeDirs = '[\\/](bin|obj|packages|node_modules|\.git|\.vs)[\\/]'
 
 # ---------------------------------------------------------------- project path
-if (Test-Path -LiteralPath $Project -PathType Container) {
+if ($ListProjects) {
+    if (-not $SolutionRoot) { throw '-ListProjects needs -SolutionRoot' }
+    $Project = $null
+}
+elseif (-not $Project) { throw 'Pass -Project (a .csproj or its folder), or -ListProjects with -SolutionRoot' }
+if ($ListProjects) { $csproj = $null; $projDir = (Resolve-Path -LiteralPath $SolutionRoot).Path; $projName = 'projects' }
+elseif (Test-Path -LiteralPath $Project -PathType Container) {
     $found = @(Get-ChildItem -LiteralPath $Project -Filter *.csproj -File)
     if ($found.Count -eq 0) { throw "No .csproj found in $Project" }
     if ($found.Count -gt 1) { throw "Multiple .csproj files in $Project - pass one explicitly: $($found.Name -join ', ')" }
@@ -47,10 +64,107 @@ if (Test-Path -LiteralPath $Project -PathType Container) {
 } else {
     $csproj = (Resolve-Path -LiteralPath $Project).Path
 }
-$projDir = Split-Path -Parent $csproj
-$projName = [IO.Path]::GetFileNameWithoutExtension($csproj)
+if (-not $ListProjects) {
+    $projDir = Split-Path -Parent $csproj
+    $projName = [IO.Path]::GetFileNameWithoutExtension($csproj)
+}
 if (-not $OutFile) { $OutFile = Join-Path ([IO.Path]::GetTempPath()) "sandbox-scan-$projName.json" }
 if ($SolutionRoot) { $SolutionRoot = (Resolve-Path -LiteralPath $SolutionRoot).Path }
+
+# ---------------------------------------------------------------- team settings (sandbox-audit.json) + version control
+function Get-Prop($obj, [string]$name, $default) {
+    if ($null -eq $obj) { return $default }
+    $p = $obj.PSObject.Properties[$name]
+    if ($p -and $null -ne $p.Value) { return $p.Value } else { return $default }
+}
+function Resolve-CfgPath([string]$p, [string]$baseDir) {
+    if (-not $p) { return $null }
+    $p = $p -replace '[\\/]', $sep
+    if ([IO.Path]::IsPathRooted($p)) { return [IO.Path]::GetFullPath($p) }
+    return [IO.Path]::GetFullPath((Join-Path $baseDir $p))
+}
+$cfgErrors = New-Object System.Collections.Generic.List[string]
+$cfgWarnings = New-Object System.Collections.Generic.List[string]
+$cfgPath = $null
+if ($Config) {
+    if (Test-Path -LiteralPath $Config) { $cfgPath = (Resolve-Path -LiteralPath $Config).Path } else { $cfgErrors.Add("Config file not found: $Config") }
+} else {
+    $dir = $projDir
+    while ($dir) {
+        $candidate = Join-Path $dir 'sandbox-audit.json'
+        if (Test-Path -LiteralPath $candidate) { $cfgPath = $candidate; break }
+        if ($SolutionRoot -and $dir.TrimEnd('\', '/') -eq $SolutionRoot.TrimEnd('\', '/')) { break }
+        $parent = Split-Path -Parent $dir
+        if (-not $parent -or $parent -eq $dir) { break }
+        $dir = $parent
+    }
+}
+$raw = $null
+if ($cfgPath) {
+    try { $raw = Get-Content -LiteralPath $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json }
+    catch { $cfgErrors.Add("sandbox-audit.json is not valid JSON: $($_.Exception.Message)") }
+}
+$cfgDir = if ($cfgPath) { Split-Path -Parent $cfgPath } else { $null }
+$target = ([string](Get-Prop $raw 'target' 'ask')).ToLowerInvariant()
+if ($target -notin @('online', 'onprem', 'ask')) { $cfgErrors.Add("target must be online, onprem or ask (got '$target')"); $target = 'ask' }
+$rep = Get-Prop $raw 'report' $null
+$repEnabled = ([string](Get-Prop $rep 'enabled' 'ask')).ToLowerInvariant()
+if ($repEnabled -notin @('true', 'false', 'ask')) { $cfgErrors.Add("report.enabled must be true, false or ask (got '$repEnabled')"); $repEnabled = 'ask' }
+$repLocation = [string](Get-Prop $rep 'location' 'ask')
+$ser = Get-Prop $raw 'serializer' $null
+$serStrategy = ([string](Get-Prop $ser 'strategy' 'builtin')).ToLowerInvariant()
+if ($serStrategy -notin @('builtin', 'existing')) { $cfgErrors.Add("serializer.strategy must be builtin or existing (got '$serStrategy')"); $serStrategy = 'builtin' }
+$serClass = [string](Get-Prop $ser 'className' 'AppSerializer')
+if ($serClass -notmatch '^[A-Za-z_]\w*$') { $cfgErrors.Add("serializer.className is not a valid C# name: '$serClass'"); $serClass = 'AppSerializer' }
+$serFiles = @()
+foreach ($sf in @(Get-Prop $ser 'files' @())) { if ($sf) { $serFiles += (Resolve-CfgPath $sf $cfgDir) } }
+$serFile = Resolve-CfgPath ([string](Get-Prop $ser 'file' '')) $cfgDir
+if ($serStrategy -eq 'existing') {
+    if (-not $serFiles.Count) { $cfgErrors.Add('serializer.strategy is existing but serializer.files is empty') }
+    if (-not (Get-Prop $ser 'serializeCall' $null) -or -not (Get-Prop $ser 'deserializeCall' $null)) { $cfgErrors.Add('serializer.strategy is existing but serializeCall / deserializeCall are missing') }
+}
+$suppressions = New-Object System.Collections.Generic.List[object]
+foreach ($sp in @(Get-Prop $raw 'acceptedFindings' @())) {
+    $f = [string](Get-Prop $sp 'file' ''); $r = [string](Get-Prop $sp 'reason' '')
+    if (-not $f) { $cfgErrors.Add('acceptedFindings entry without "file"'); continue }
+    if (-not $r) { $cfgWarnings.Add("acceptedFindings entry for '$f' has no reason - add one so reviewers know why") }
+    $isPattern = $f -match '[\*\?]'
+    $suppressions.Add([pscustomobject]@{
+        File = $(if ($isPattern) { $f -replace '[\\/]', $sep } else { Resolve-CfgPath $f $cfgDir }); IsPattern = $isPattern
+        Api = [string](Get-Prop $sp 'api' ''); Line = [int](Get-Prop $sp 'line' 0); Reason = $r
+    })
+}
+$skipProjects = @(Get-Prop $raw 'skipProjects' @())
+$httpTimeout = [int](Get-Prop (Get-Prop $raw 'http' $null) 'timeoutSeconds' 90)
+if ($httpTimeout -lt 1 -or $httpTimeout -gt 110) { $cfgWarnings.Add("http.timeoutSeconds $httpTimeout is outside 1-110; plug-ins are stopped at 120 s - using 90"); $httpTimeout = 90 }
+$knownKeys = @('$schema', 'version', 'target', 'report', 'serializer', 'sharedHelperFolder', 'skipProjects', 'http', 'acceptedFindings', 'notes')
+if ($raw) { foreach ($pn in $raw.PSObject.Properties.Name) { if ($knownKeys -notcontains $pn) { $cfgWarnings.Add("Unknown setting '$pn' (ignored)") } } }
+$sharedHelper = Resolve-CfgPath ([string](Get-Prop $raw 'sharedHelperFolder' '')) $cfgDir
+if ($sharedHelper -and -not (Test-Path -LiteralPath $sharedHelper)) { $cfgWarnings.Add("sharedHelperFolder does not exist yet: $sharedHelper") }
+
+function Test-Accepted($hitFile, $hitApi, $hitCategory, [int]$hitLine) {
+    foreach ($sp in $suppressions) {
+        $fileOk = if ($sp.IsPattern) { $hitFile -like ('*' + $sp.File.TrimStart('*')) -or $hitFile -like $sp.File } else { [string]::Equals($hitFile, $sp.File, [StringComparison]::OrdinalIgnoreCase) }
+        if (-not $fileOk) { continue }
+        if ($sp.Api -and -not ($hitApi -like $sp.Api -or $hitCategory -eq $sp.Api)) { continue }
+        if ($sp.Line -and $sp.Line -ne $hitLine) { continue }
+        return $(if ($sp.Reason) { $sp.Reason } else { 'accepted in sandbox-audit.json' })
+    }
+    return $null
+}
+
+function Get-Vcs([string]$start) {
+    $d = $start
+    while ($d) {
+        if (Test-Path -LiteralPath (Join-Path $d '.git')) { return [pscustomobject]@{ Type = 'git'; Root = $d } }
+        if ((Test-Path -LiteralPath (Join-Path $d '$tf')) -or (Test-Path -LiteralPath (Join-Path $d '$TF'))) { return [pscustomobject]@{ Type = 'tfvc'; Root = $d } }
+        $parent = Split-Path -Parent $d
+        if (-not $parent -or $parent -eq $d) { break }
+        $d = $parent
+    }
+    return [pscustomobject]@{ Type = 'none'; Root = $null }
+}
+$vcs = Get-Vcs $projDir
 
 # ---------------------------------------------------------------- helpers
 function Expand-MsBuildPath([string]$value, [string]$thisFileDir) {
@@ -360,6 +474,10 @@ function Resolve-UrlSource([string]$expr, $lines, [int]$memberStart, [int]$lineI
 }
 
 # ---------------------------------------------------------------- resolve files
+$files = New-Object 'System.Collections.Generic.Dictionary[string,object]' $cmp
+$unresolved = New-Object System.Collections.Generic.List[string]
+$notCompiled = @()
+if (-not $ListProjects) {
 [xml]$projXml = Get-Content -LiteralPath $csproj -Raw
 $isSdk = [bool]$projXml.DocumentElement.GetAttribute('Sdk')
 $assemblyName = (Get-XmlNodes $projXml 'AssemblyName' | Select-Object -First 1).InnerText
@@ -368,19 +486,17 @@ $targetFw = (Get-XmlNodes $projXml 'TargetFrameworkVersion' | Select-Object -Fir
 if (-not $targetFw) { $targetFw = (Get-XmlNodes $projXml 'TargetFramework' | Select-Object -First 1).InnerText }
 
 $all = Get-CompileFiles $csproj $isSdk
-$files = New-Object 'System.Collections.Generic.Dictionary[string,object]' $cmp
-$unresolved = New-Object System.Collections.Generic.List[string]
 foreach ($f in $all) {
     if ($f.Path -like 'UNRESOLVED:*') { $unresolved.Add($f.Path.Substring(11)); continue }
     if ($f.Path -notlike '*.cs') { continue }
     if (-not $files.ContainsKey($f.Path)) { $files[$f.Path] = $f }
 }
 
-$notCompiled = @()
 if (-not $isSdk) {
     $notCompiled = @(Get-ChildItem -LiteralPath $projDir -Recurse -Filter *.cs -File |
         Where-Object { $_.FullName -notmatch $excludeDirs -and -not $files.ContainsKey($_.FullName) } |
         ForEach-Object { $_.FullName.Substring($projDir.Length).TrimStart('\', '/') })
+}
 }
 
 # ---------------------------------------------------------------- solution-wide info (optional)
@@ -393,18 +509,18 @@ if ($SolutionRoot) {
     $solutionProjects = $projFiles.Count
     $appSerializers = @(Get-ChildItem -LiteralPath $SolutionRoot -Recurse -Filter *.cs -File -ErrorAction SilentlyContinue |
         Where-Object { $_.FullName -notmatch $excludeDirs } |
-        Select-String -Pattern '\bclass\s+AppSerializer\b' -List |
+        Select-String -Pattern ('\bclass\s+' + $serClass + '\b') -List |
         ForEach-Object {
             $content = [IO.File]::ReadAllText($_.Path)
             $content = $content -replace '(?s)/\*.*?\*/', '' -replace '(?m)//.*$', ''   # ignore comments
             $ns = [regex]::Match($content, '\bnamespace\s+([\w\.]+)').Groups[1].Value
-            $decl = [regex]::Match($content, '\bclass\s+AppSerializer\b\s*(?::\s*(?<b>[^{]+))?')
+            $decl = [regex]::Match($content, '\bclass\s+' + $serClass + '\b\s*(?::\s*(?<b>[^{]+))?')
             $extUsings = @([regex]::Matches($content, '(?m)^\s*using\s+(?!System\b)(?!static\s+System\b)([\w\.]+)\s*;') | ForEach-Object { $_.Groups[1].Value })
             [pscustomobject]@{
                 Path = $_.Path
                 Namespace = $ns
-                Visibility = if ($content -match '\bpublic\s+(sealed\s+|static\s+)?class\s+AppSerializer') { 'public' } else { 'internal' }
-                IsStatic = [bool]($content -match '\bstatic\s+class\s+AppSerializer\b')
+                Visibility = if ($content -match ('\bpublic\s+(sealed\s+|static\s+)?class\s+' + $serClass + '\b')) { 'public' } else { 'internal' }
+                IsStatic = [bool]($content -match ('\bstatic\s+class\s+' + $serClass + '\b'))
                 HasGenericApi = [bool](($content -match '\bstatic\s+string\s+Serialize\s*<') -and ($content -match '\bstatic\s+T\s+Deserialize\s*<'))
                 HasDateStyle = [bool]($content -match '\bJsonDateStyle\b')
                 UsesBlockedSerializer = [bool]($content -match '\b(JavaScriptSerializer|JsonConvert|Newtonsoft)\b')
@@ -439,6 +555,104 @@ if ($SolutionRoot) {
     }
 }
 
+foreach ($a in $appSerializers) {
+    if ($linkCount.ContainsKey($a.Path)) { $a.LinkedBy = $linkCount[$a.Path].ToArray() }
+    if ($appOwners.ContainsKey($a.Path)) { $a.OwnedBy = $appOwners[$a.Path].ToArray() }
+    $a.CompiledIntoThisProject = $files.ContainsKey($a.Path)
+    # Reusable = can be linked as one self-contained source file with the static AppSerializer API
+    $blockers = New-Object System.Collections.Generic.List[string]
+    if ($a.UsesBlockedSerializer) { $blockers.Add('uses JavaScriptSerializer / Newtonsoft (blocked in Sandbox)') }
+    if (-not $a.IsStatic -or -not $a.HasGenericApi) { $blockers.Add('instance / interface style API (e.g. AppSerializer.Instance.Serialize), not the static Serialize<T> / Deserialize<T> helper') }
+    if ($a.Implements) { $blockers.Add("implements $($a.Implements) - cannot be linked as a single file") }
+    if (@($a.ExternalUsings).Count) { $blockers.Add("depends on $((@($a.ExternalUsings)) -join ', ') - cannot be linked as a single file") }
+    $notes = New-Object System.Collections.Generic.List[string]
+    if (@($a.OwnedBy).Count) { $notes.Add("part of project $((@($a.OwnedBy)) -join ', ') (its own DLL) - plug-ins must link the file, never reference that DLL") }
+    if ($a.OldDateFormat) { $notes.Add('old date format ...fffZ - replace with the current AppSerializer version') }
+    elseif (-not $a.HasDateStyle -and $blockers.Count -eq 0) { $notes.Add('no JsonDateStyle option - replace with the current AppSerializer version (same API, adds the option)') }
+    $a.Reusable = ($blockers.Count -eq 0)
+    $a.Upgrade = ($blockers.Count -eq 0) -and ($a.OldDateFormat -or -not $a.HasDateStyle)
+    $a.Reasons = @($blockers) + @($notes)
+}
+
+# ---------------------------------------------------------------- -ListProjects (setup mode)
+if ($ListProjects) {
+    $rootFull = $SolutionRoot.TrimEnd('\', '/')
+    function Get-RelToRoot([string]$p) { if ($p.StartsWith($rootFull, [StringComparison]::OrdinalIgnoreCase)) { $p.Substring($rootFull.Length).TrimStart('\', '/') } else { $p } }
+    $declCache = @{}
+    $rows = New-Object System.Collections.Generic.List[object]
+    $folderUse = @{}
+    foreach ($pf in $projFiles) {
+        try {
+            [xml]$px = Get-Content -LiteralPath $pf.FullName -Raw
+            $sdkAttr = $px.DocumentElement.GetAttribute('Sdk')
+            $script:projDir = $pf.DirectoryName
+            $cfs = @(Get-CompileFiles $pf.FullName ([bool]$sdkAttr) | Where-Object { $_.Path -like '*.cs' -and $_.Path -notlike 'UNRESOLVED:*' })
+            $classes = @{}
+            foreach ($cf in $cfs) {
+                if (-not $declCache.ContainsKey($cf.Path)) {
+                    $list = @()
+                    if (Test-Path -LiteralPath $cf.Path) {
+                        foreach ($m in [regex]::Matches([IO.File]::ReadAllText($cf.Path), '(?m)^(?<pre>[^/\r\n]*?)\bclass\s+(?<n>\w+)(?:<[^>]*>)?\s*:\s*(?<b>[^{\r\n]+)')) {
+                            $bases = @($m.Groups['b'].Value -split ',' | ForEach-Object { (($_.Trim() -split '<')[0] -split '\.')[-1].Trim() } | Where-Object { $_ -and $_ -ne 'where' })
+                            $list += [pscustomobject]@{ Name = $m.Groups['n'].Value; Bases = $bases; Abstract = [bool]($m.Groups['pre'].Value -match '\babstract\b') }
+                        }
+                    }
+                    $declCache[$cf.Path] = $list
+                }
+                foreach ($dcl in $declCache[$cf.Path]) { $classes[$dcl.Name] = $dcl }
+            }
+            $kindOf = {
+                param($name, $d)
+                if ($d -gt 12 -or -not $classes.ContainsKey($name)) { return $null }
+                $cb = $classes[$name]
+                if ($cb.Bases -contains 'IPlugin') { return 'Plugin' }
+                if ($cb.Bases.Count -and $cb.Bases[0] -match '^(CodeActivity|AsyncCodeActivity|NativeActivity)$') { return 'WorkflowActivity' }
+                foreach ($b in $cb.Bases) { $k = & $kindOf $b ($d + 1); if ($k) { return $k } }
+                return $null
+            }
+            $np = 0; $nw = 0
+            foreach ($cn in $classes.Keys) { if ($classes[$cn].Abstract) { continue }; $k = & $kindOf $cn 0; if ($k -eq 'Plugin') { $np++ } elseif ($k -eq 'WorkflowActivity') { $nw++ } }
+            $fw = (Get-XmlNodes $px 'TargetFrameworkVersion' | Select-Object -First 1).InnerText
+            if (-not $fw) { $fw = (Get-XmlNodes $px 'TargetFramework' | Select-Object -First 1).InnerText }
+            if (-not $fw) { $fw = (Get-XmlNodes $px 'TargetFrameworks' | Select-Object -First 1).InnerText }
+            $outType = (Get-XmlNodes $px 'OutputType' | Select-Object -First 1).InnerText
+            $linkedDirs = @($cfs | Where-Object { $_.Source -ne 'local' } | ForEach-Object { Get-RelToRoot (Split-Path -Parent $_.Path) } | Sort-Object -Unique)
+            $kind = if ($np -and $nw) { 'Plugins+WorkflowActivities' } elseif ($np) { 'Plugins' } elseif ($nw) { 'WorkflowActivities' } else { 'Other' }
+            if ($kind -ne 'Other') { foreach ($ld in $linkedDirs) { if ($folderUse.ContainsKey($ld)) { $folderUse[$ld]++ } else { $folderUse[$ld] = 1 } } }
+            $hint = $null
+            if ($sdkAttr -match 'Web' -or $pf.BaseName -match '(?i)(\bApi\b|\.Api$|Portal|\bWeb\b|\.Web$|Tests?$|UnitTest|Console)' -or $outType -match '(?i)exe') { $hint = 'likely full trust (API / Portal / web / test / console) - suggest skipProjects' }
+            $skipped = [bool]($skipProjects | Where-Object { $pf.BaseName -like $_ })
+            $rows.Add([pscustomobject]@{
+                Name = $pf.BaseName; Path = (Get-RelToRoot $pf.FullName); Style = $(if ($sdkAttr) { 'sdk' } else { 'legacy' })
+                TargetFramework = $fw; Kind = $kind; Plugins = $np; WorkflowActivities = $nw
+                CompiledFiles = $cfs.Count; LinkedFiles = @($cfs | Where-Object { $_.Source -ne 'local' }).Count
+                LinkedFromFolders = $linkedDirs; Hint = $hint; Skipped = $skipped
+            })
+        } catch { Write-Warning "Could not read $($pf.FullName): $($_.Exception.Message)" }
+    }
+    $topFolders = @($folderUse.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 8 | ForEach-Object { [pscustomobject]@{ Folder = $_.Key; UsedByPluginProjects = $_.Value } })
+    $out = [pscustomobject]@{
+        SolutionRoot = $SolutionRoot; Settings = [pscustomobject]@{ Path = $cfgPath; Errors = $cfgErrors.ToArray(); Warnings = $cfgWarnings.ToArray() }
+        VersionControl = (Get-Vcs $SolutionRoot); SerializerClassName = $serClass
+        Projects = $rows.ToArray(); SharedFolderCandidates = $topFolders; ExistingSerializers = @($appSerializers)
+        Counts = [pscustomobject]@{ Projects = $rows.Count; PluginOrWorkflow = @($rows | Where-Object { $_.Kind -ne 'Other' }).Count; LikelyFullTrust = @($rows | Where-Object { $_.Hint }).Count; Skipped = @($rows | Where-Object { $_.Skipped }).Count }
+        ElapsedSeconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+    }
+    $od = Split-Path -Parent $OutFile; if ($od -and -not (Test-Path -LiteralPath $od)) { New-Item -ItemType Directory -Path $od | Out-Null }
+    $out | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $OutFile -Encoding UTF8
+    Write-Output ("Projects under {0}: {1} ({2} with plug-ins / workflow activities, {3} likely full trust, {4} skipped by settings)" -f $SolutionRoot, $out.Counts.Projects, $out.Counts.PluginOrWorkflow, $out.Counts.LikelyFullTrust, $out.Counts.Skipped)
+    Write-Output ("Version control: {0}" -f $out.VersionControl.Type)
+    foreach ($r in ($rows | Sort-Object Kind, Name)) {
+        Write-Output ("  [{0}] {1}  ({2}, {3}; {4} plug-ins, {5} workflow activities; {6} files, {7} linked){8}{9}" -f $r.Kind, $r.Path, $r.Style, $r.TargetFramework, $r.Plugins, $r.WorkflowActivities, $r.CompiledFiles, $r.LinkedFiles, $(if ($r.Hint) { ' - ' + $r.Hint } else { '' }), $(if ($r.Skipped) { ' [SKIPPED]' } else { '' }))
+    }
+    Write-Output 'Shared folders most linked by plug-in / workflow projects:'
+    foreach ($t in $topFolders) { Write-Output ("  {0} ({1} projects)" -f $t.Folder, $t.UsedByPluginProjects) }
+    Write-Output ("Existing {0} classes: {1}" -f $serClass, @($appSerializers).Count)
+    foreach ($a in $appSerializers) { Write-Output ("  {0} - {1}" -f (Get-RelToRoot $a.Path), $(if ($a.Reusable) { 'reusable' } else { 'not reusable: ' + (@($a.Reasons) -join '; ') })) }
+    Write-Output "JSON: $OutFile  ($($out.ElapsedSeconds)s)"
+    return
+}
+
 # ---------------------------------------------------------------- scan
 $hits = New-Object System.Collections.Generic.List[object]
 $fileRows = New-Object System.Collections.Generic.List[object]
@@ -457,12 +671,21 @@ foreach ($f in $files.Values) {
         $member = $null; $memberStart = -1; $memberBase = @{}
         $typeNames = New-Object System.Collections.Generic.List[string]
         $depth = 0; $loops = New-Object System.Collections.Generic.List[object]
+        $pendingIgnore = $null
         for ($i = 0; $i -lt $lines.Length; $i++) {
             $line = $lines[$i]; $t = $line.Trim()
             # block comments (line-level approximation)
             if ($inBlock) { if ($t.Contains('*/')) { $inBlock = $false }; continue }
             if ($t.StartsWith('/*')) { if (-not $t.Contains('*/')) { $inBlock = $true }; continue }
-            if ($t.StartsWith('//')) { continue }
+            if ($t.StartsWith('//')) {
+                $ig = [regex]::Match($t, '^//+\s*sandbox-ignore\b[:\s-]*(?<r>.*)$')
+                if ($ig.Success) { $pendingIgnore = $(if ($ig.Groups['r'].Value.Trim()) { $ig.Groups['r'].Value.Trim() } else { 'sandbox-ignore comment' }) }
+                continue
+            }
+            # accepted for this line: "// sandbox-ignore: reason" on the same line or the line above
+            $lineIgnore = $pendingIgnore; $pendingIgnore = $null
+            $igSame = [regex]::Match($line, '//+\s*sandbox-ignore\b[:\s-]*(?<r>.*)$')
+            if ($igSame.Success) { $lineIgnore = $(if ($igSame.Groups['r'].Value.Trim()) { $igSame.Groups['r'].Value.Trim() } else { 'sandbox-ignore comment' }) }
             # preprocessor tracking for #if DEBUG
             if ($t -match '^#if\s+(.*)') { $ppStack.Add($(if ($matches[1] -match '^\s*DEBUG\b') { 'debug' } else { 'other' })); continue }
             if ($t -match '^#else' -and $ppStack.Count) { if ($ppStack[$ppStack.Count - 1] -eq 'debug') { $ppStack[$ppStack.Count - 1] = 'notdebug' }; continue }
@@ -490,7 +713,8 @@ foreach ($f in $files.Values) {
                 foreach ($um in $urlLiteralRx.Matches($line)) {
                     $u = $um.Groups['u'].Value; $uc = Get-UrlClass $u
                     if ($uc.Host -and $uc.Host -match $nsHosts) { continue }
-                    $urlLiterals.Add([pscustomobject]@{ File = $f.Path; Source = $f.Source; Line = $i + 1; Member = $member; Url = $u; Class = $uc.Class; Detail = $uc.Detail })
+                    $acc = if ($lineIgnore) { $lineIgnore } else { Test-Accepted $f.Path 'URL' 'Network' ($i + 1) }
+                    $urlLiterals.Add([pscustomobject]@{ File = $f.Path; Source = $f.Source; Line = $i + 1; Member = $member; Url = $u; Class = $uc.Class; Detail = $uc.Detail; Accepted = $acc })
                 }
                 $ba = $baseAddrRx.Match($line)
                 if ($ba.Success) { $memberBase[$ba.Groups['o'].Value] = Resolve-UrlSource $ba.Groups['rhs'].Value $lines $memberStart $i $fileText 0 }
@@ -508,6 +732,7 @@ foreach ($f in $files.Values) {
                         UrlSource = $res.Source; UrlKey = $res.Key; Via = $res.Via; Url = $res.Url
                         UrlClass = $(if ($uc) { $uc.Class } else { $null }); UrlDetail = $(if ($uc) { $uc.Detail } else { $null })
                         InLoop = $inLoop; LoopLine = $loopLine
+                        Accepted = $(if ($lineIgnore) { $lineIgnore } else { Test-Accepted $f.Path 'HTTP call' 'HTTP' ($i + 1) })
                     })
                 }
                 if ($inLoop) {
@@ -538,6 +763,7 @@ foreach ($f in $files.Values) {
             foreach ($p in $compiled) {
                 if (-not $p.Regex.IsMatch($line)) { continue }
                 $count++
+                $acc = if ($lineIgnore) { $lineIgnore } else { Test-Accepted $f.Path $p.Api $p.Category ($i + 1) }
                 $hits.Add([pscustomobject]@{
                     File     = $f.Path
                     Source   = $f.Source
@@ -548,6 +774,7 @@ foreach ($f in $files.Values) {
                     Member   = $(if ($isUsing) { $null } else { $member })
                     InDebug  = $ppStack.Contains('debug')
                     Text     = $(if ($t.Length -gt 200) { $t.Substring(0, 200) + '...' } else { $t })
+                    Accepted = $acc
                 })
             }
         }
@@ -561,24 +788,6 @@ foreach ($f in $files.Values) {
         SharedByProjects = $(if ($sharedBy) { $sharedBy.Count } else { $null })
         SharedBy = $sharedBy
     })
-}
-foreach ($a in $appSerializers) {
-    if ($linkCount.ContainsKey($a.Path)) { $a.LinkedBy = $linkCount[$a.Path].ToArray() }
-    if ($appOwners.ContainsKey($a.Path)) { $a.OwnedBy = $appOwners[$a.Path].ToArray() }
-    $a.CompiledIntoThisProject = $files.ContainsKey($a.Path)
-    # Reusable = can be linked as one self-contained source file with the static AppSerializer API
-    $blockers = New-Object System.Collections.Generic.List[string]
-    if ($a.UsesBlockedSerializer) { $blockers.Add('uses JavaScriptSerializer / Newtonsoft (blocked in Sandbox)') }
-    if (-not $a.IsStatic -or -not $a.HasGenericApi) { $blockers.Add('instance / interface style API (e.g. AppSerializer.Instance.Serialize), not the static Serialize<T> / Deserialize<T> helper') }
-    if ($a.Implements) { $blockers.Add("implements $($a.Implements) - cannot be linked as a single file") }
-    if (@($a.ExternalUsings).Count) { $blockers.Add("depends on $((@($a.ExternalUsings)) -join ', ') - cannot be linked as a single file") }
-    $notes = New-Object System.Collections.Generic.List[string]
-    if (@($a.OwnedBy).Count) { $notes.Add("part of project $((@($a.OwnedBy)) -join ', ') (its own DLL) - plug-ins must link the file, never reference that DLL") }
-    if ($a.OldDateFormat) { $notes.Add('old date format ...fffZ - replace with the current AppSerializer version') }
-    elseif (-not $a.HasDateStyle -and $blockers.Count -eq 0) { $notes.Add('no JsonDateStyle option - replace with the current AppSerializer version (same API, adds the option)') }
-    $a.Reusable = ($blockers.Count -eq 0)
-    $a.Upgrade = ($blockers.Count -eq 0) -and ($a.OldDateFormat -or -not $a.HasDateStyle)
-    $a.Reasons = @($blockers) + @($notes)
 }
 
 # ---------------------------------------------------------------- references
@@ -680,6 +889,59 @@ $online = [pscustomobject]@{
     LoopRisks            = $loopRisks.ToArray()
 }
 
+# ---------------------------------------------------------------- configured serializer check
+$serializerCheck = $null
+if ($serStrategy -eq 'existing') {
+    $declared = New-Object System.Collections.Generic.List[string]
+    $fileChecks = New-Object System.Collections.Generic.List[object]
+    $contents = @{}
+    foreach ($sf in $serFiles) {
+        if (Test-Path -LiteralPath $sf) {
+            $c = [IO.File]::ReadAllText($sf) -replace '(?s)/\*.*?\*/', '' -replace '(?m)//.*$', ''
+            $contents[$sf] = $c
+            foreach ($nm in [regex]::Matches($c, '\bnamespace\s+([\w\.]+)')) { $declared.Add($nm.Groups[1].Value) }
+        }
+    }
+    $allProblems = New-Object System.Collections.Generic.List[string]
+    foreach ($sf in $serFiles) {
+        $probs = New-Object System.Collections.Generic.List[string]
+        if (-not $contents.ContainsKey($sf)) { $probs.Add('file not found') }
+        else {
+            $c = $contents[$sf]
+            foreach ($ln in ($c -split "`n")) {
+                if (-not $prefilter.IsMatch($ln)) { continue }
+                foreach ($pt in $compiled) {
+                    if (($pt.Severity -eq 'Blocked' -or $pt.Severity -eq 'Avoid') -and $pt.Regex.IsMatch($ln) -and $ln.Trim() -notmatch '^using\s') { $probs.Add("$($pt.Severity): $($pt.Api) - $($ln.Trim())") }
+                }
+            }
+            foreach ($um in [regex]::Matches($c, '(?m)^\s*using\s+(?!System\b)(?!static\s+System\b)([\w\.]+)\s*;')) {
+                $u = $um.Groups[1].Value
+                if (-not ($declared | Where-Object { $u -eq $_ -or $_.StartsWith($u + '.') })) { $probs.Add("depends on namespace $u, which is not in serializer.files - add its file(s)") }
+            }
+        }
+        foreach ($pr in $probs) { $allProblems.Add("$([IO.Path]::GetFileName($sf)): $pr") }
+        $fileChecks.Add([pscustomobject]@{ Path = $sf; Exists = $contents.ContainsKey($sf); Problems = $probs.ToArray() })
+    }
+    $serializerCheck = [pscustomobject]@{
+        Strategy = 'existing'; ClassName = $serClass; Files = $fileChecks.ToArray()
+        SerializeCall = [string](Get-Prop $ser 'serializeCall' ''); DeserializeCall = [string](Get-Prop $ser 'deserializeCall' '')
+        Usings = @(Get-Prop $ser 'usings' @()); DateStyle = [string](Get-Prop $ser 'dateStyle' '')
+        SandboxSafe = ($allProblems.Count -eq 0); Problems = $allProblems.ToArray()
+        CompiledIntoThisProject = @($serFiles | Where-Object { $files.ContainsKey($_) }).Count -eq $serFiles.Count
+    }
+} else {
+    $serializerCheck = [pscustomobject]@{
+        Strategy = 'builtin'; ClassName = $serClass; Namespace = [string](Get-Prop $ser 'namespace' '')
+        File = $serFile; FileExists = [bool]($serFile -and (Test-Path -LiteralPath $serFile))
+    }
+}
+$settings = [pscustomobject]@{
+    Path = $cfgPath; Loaded = [bool]$raw; Errors = $cfgErrors.ToArray(); Warnings = $cfgWarnings.ToArray()
+    Target = $target; ReportEnabled = $repEnabled; ReportLocation = $repLocation
+    SharedHelperFolder = $sharedHelper; SkipProjects = $skipProjects; HttpTimeoutSeconds = $httpTimeout
+    AcceptedFindings = $suppressions.ToArray()
+}
+
 # ---------------------------------------------------------------- output
 $fileList = @($fileRows | Sort-Object Source, Path)
 $result = [pscustomobject]@{
@@ -696,11 +958,15 @@ $result = [pscustomobject]@{
         Missing = @($fileList | Where-Object { -not $_.Exists }).Count
         FilesWithHits = @($fileList | Where-Object { $_.Hits -gt 0 }).Count
         Hits    = $hits.Count
-        Blocked = @($hits | Where-Object Severity -eq 'Blocked').Count
-        Avoid   = @($hits | Where-Object Severity -eq 'Avoid').Count
-        Review  = @($hits | Where-Object Severity -eq 'Review').Count
-        Harden  = @($hits | Where-Object Severity -eq 'Harden').Count
+        Blocked = @($hits | Where-Object { $_.Severity -eq 'Blocked' -and -not $_.Accepted }).Count
+        Avoid   = @($hits | Where-Object { $_.Severity -eq 'Avoid' -and -not $_.Accepted }).Count
+        Review  = @($hits | Where-Object { $_.Severity -eq 'Review' -and -not $_.Accepted }).Count
+        Harden  = @($hits | Where-Object { $_.Severity -eq 'Harden' -and -not $_.Accepted }).Count
+        Accepted = @($hits | Where-Object { $_.Accepted }).Count
     }
+    Settings           = $settings
+    SerializerCheck    = $serializerCheck
+    VersionControl     = $vcs
     OnlineReadiness    = $online
     Files              = $fileList
     Hits               = $hits.ToArray()
@@ -723,9 +989,17 @@ $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $OutFile -Encoding 
 $c = $result.Counts
 Write-Output "Project: $projName ($($result.ProjectStyle), $targetFw) -> $assemblyName.dll"
 Write-Output "Files: $($c.Files) compiled ($($c.Local) local, $($c.Linked) linked, $($c.Shared) shared) | missing: $($c.Missing) | unresolved includes: $($unresolved.Count)"
-Write-Output "Hits: $($c.Hits) in $($c.FilesWithHits) files (Blocked $($c.Blocked), Avoid $($c.Avoid), Review $($c.Review), Harden $($c.Harden), Using $(@($hits | Where-Object Severity -eq 'Using').Count))"
+Write-Output "Hits: $($c.Hits) in $($c.FilesWithHits) files (Blocked $($c.Blocked), Avoid $($c.Avoid), Review $($c.Review), Harden $($c.Harden), Using $(@($hits | Where-Object Severity -eq 'Using').Count), Accepted $($c.Accepted))"
+Write-Output ("Settings: {0}" -f $(if ($cfgPath) { $cfgPath } else { 'none (defaults)' }))
+foreach ($e in $cfgErrors) { Write-Output "  ERROR: $e" }
+foreach ($w in $cfgWarnings) { Write-Output "  warning: $w" }
+Write-Output ("Version control: {0}{1}" -f $vcs.Type, $(if ($vcs.Root) { " ($($vcs.Root))" } else { '' }))
+if ($serializerCheck.Strategy -eq 'existing') {
+    Write-Output ("Serializer: existing {0} - {1}" -f $serClass, $(if ($serializerCheck.SandboxSafe) { 'Sandbox-safe' } else { 'NOT Sandbox-safe' }))
+    foreach ($pr in $serializerCheck.Problems) { Write-Output "  - $pr" }
+} else { Write-Output ("Serializer: builtin {0}{1}" -f $serClass, $(if ($serializerCheck.File) { " -> $($serializerCheck.File)" } else { '' })) }
 if ($SolutionRoot) {
-    Write-Output "Solution: $solutionProjects projects scanned for shared links | existing AppSerializer: $(@($appSerializers).Count)"
+    Write-Output "Solution: $solutionProjects projects scanned for shared links | existing ${serClass}: $(@($appSerializers).Count)"
     foreach ($a in $appSerializers) {
         $verdict = if (-not $a.Reusable) { 'NOT reusable' } elseif ($a.Upgrade) { 'reusable after upgrade' } else { 'reusable' }
         $where = if ($a.CompiledIntoThisProject) { ' [already compiled into this project]' } else { '' }
@@ -738,6 +1012,7 @@ foreach ($h in ($hits | Sort-Object Source, File, Line)) {
     $rel = if ($h.File.StartsWith($projDir, [StringComparison]::OrdinalIgnoreCase)) { $h.File.Substring($projDir.Length).TrimStart('\', '/') } else { $h.File }
     $tag = if ($h.Source -ne 'local') { "[$($h.Source.ToUpper())] " } else { '' }
     $dbg = if ($h.InDebug) { ' (#if DEBUG)' } else { '' }
+    if ($h.Accepted) { $dbg += " (ACCEPTED: $($h.Accepted))" }
     Write-Output ("{0}{1}:{2} [{3}/{4}] {5} | {6}{7}" -f $tag, $rel, $h.Line, $h.Severity, $h.Category, $h.Api, $h.Member, $dbg)
 }
 function Get-Rel([string]$p) { if ($p -and $p.StartsWith($projDir, [StringComparison]::OrdinalIgnoreCase)) { $p.Substring($projDir.Length).TrimStart('\', '/') } else { $p } }
@@ -756,7 +1031,7 @@ foreach ($hc in $httpCalls) {
 }
 $flagged = @($urlLiterals | Where-Object { $_.Class -ne 'LooksPublic' })
 Write-Output ("Hard-coded URLs: {0} ({1} flagged)" -f $urlLiterals.Count, $flagged.Count)
-foreach ($ul in $flagged) { Write-Output ("  {0}:{1} {2} [{3}: {4}]" -f (Get-Rel $ul.File), $ul.Line, $ul.Url, $ul.Class, $ul.Detail) }
+foreach ($ul in $flagged) { Write-Output ("  {0}:{1} {2} [{3}: {4}]{5}" -f (Get-Rel $ul.File), $ul.Line, $ul.Url, $ul.Class, $ul.Detail, $(if ($ul.Accepted) { " (ACCEPTED: $($ul.Accepted))" } else { '' })) }
 Write-Output ("Calls inside loops: {0}" -f $loopRisks.Count)
 foreach ($lr in $loopRisks) { Write-Output ("  {0}:{1} {2} {3} (loop @ line {4})" -f (Get-Rel $lr.File), $lr.Line, $lr.Member, $lr.Call, $lr.LoopLine) }
 Write-Output "JSON: $OutFile  ($($result.ElapsedSeconds)s)"

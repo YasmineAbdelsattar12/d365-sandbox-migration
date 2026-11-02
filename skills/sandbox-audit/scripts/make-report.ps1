@@ -6,7 +6,9 @@
     Inputs:
       -Data    report-data.json written by Claude at the end of the run (schema: references/report-schema.md)
       -Scan    the scanner JSON from scan.ps1 (optional - adds file lists and scan statistics)
-      -Repo    git repository root (optional - adds the real code diff since -BaseCommit)
+      -Repo    git repository root (optional - adds the real code diff since BaseCommit)
+      -DiffFile a unified diff produced some other way, e.g. TFVC:
+               tf diff <paths> /recursive /format:unified > changes.diff   (optional, used when -Repo is not git)
     Output:
       <OutDir>\<Project>-sandbox-migration-<yyyyMMdd-HHmm>.html and .pdf
     The PDF is produced with Microsoft Edge (or Chrome) in headless mode - both are
@@ -16,7 +18,7 @@
     Compatible with Windows PowerShell 5.1 and PowerShell 7+.
 
 .EXAMPLE
-    powershell -NoProfile -ExecutionPolicy Bypass -File make-report.ps1 -Data "$env:TEMP\report-data.json" -Scan "$env:TEMP\sandbox-scan-X.json" -Repo "D:\Gea" -OutDir "D:\Gea\docs\sandbox-migration" -Open
+    powershell -NoProfile -ExecutionPolicy Bypass -File make-report.ps1 -Data "$env:TEMP\report-data.json" -Scan "$env:TEMP\sandbox-scan-X.json" -Repo "D:\Repo" -OutDir "D:\Repo\docs\sandbox-migration" -Open
 #>
 [CmdletBinding()]
 param(
@@ -24,6 +26,7 @@ param(
     [string]$Scan,
     [string]$Repo,
     [Parameter(Mandatory = $true)][string]$OutDir,
+    [string]$DiffFile,             # optional unified diff (TFVC: tf diff /format:unified)
     [string]$Browser,              # optional explicit path to msedge.exe / chrome.exe
     [int]$MaxDiffLinesPerFile = 400,
     [switch]$Open
@@ -119,6 +122,41 @@ if ($Repo -and (Test-Path -LiteralPath $Repo) -and (Has $d.ChangedPaths)) {
     }
 }
 
+if (-not $diffBlocks.Count -and $DiffFile -and (Test-Path -LiteralPath $DiffFile)) {
+    # Generic unified diff (TFVC "tf diff /format:unified", or any other tool)
+    $cur = $null; $curLines = $null
+    $flush = {
+        if ($script:cur -and $null -ne $script:curLines -and $script:curLines.Count) {
+            $ls = $script:curLines; $tr = $false
+            if ($ls.Count -gt $MaxDiffLinesPerFile) { $ls = $ls.GetRange(0, $MaxDiffLinesPerFile); $tr = $true }
+            $sb = New-Object System.Text.StringBuilder
+            [void]$sb.Append("<div class=""diff""><div class=""diff-file"">$(E $script:cur)</div><pre>")
+            foreach ($l in $ls) {
+                $cls = if ($l.StartsWith('@@')) { 'h' } elseif ($l.StartsWith('+')) { 'a' } elseif ($l.StartsWith('-')) { 'r' } else { 'c' }
+                [void]$sb.Append("<span class=""$cls"">$(E $l)</span>")
+            }
+            [void]$sb.Append('</pre>')
+            if ($tr) { [void]$sb.Append("<div class=""muted small"">Diff truncated after $MaxDiffLinesPerFile lines.</div>") }
+            [void]$sb.Append('</div>')
+            $script:diffBlocks.Add($sb.ToString())
+        }
+    }
+    $all = [IO.File]::ReadAllLines($DiffFile)
+    for ($k = 0; $k -lt $all.Length; $k++) {
+        $l = $all[$k]
+        if ($l.StartsWith('--- ') -and $k + 1 -lt $all.Length -and $all[$k + 1].StartsWith('+++ ')) {
+            & $flush
+            $name = ($all[$k + 1].Substring(4) -split "`t")[0].Trim() -replace '^b/', '' -replace '\s+\((local|server)\).*$', '' -replace ';C\d+$', ''
+            if ($name -match '^(/dev/null|NUL)$') { $name = ($l.Substring(4) -split "`t")[0].Trim() -replace '^a/', '' }
+            $script:cur = $name; $script:curLines = New-Object System.Collections.Generic.List[string]; $k++; continue
+        }
+        if ($l -match '^(diff |Index: |=+\s*$|File: |Comparing )') { continue }
+        if ($null -ne $script:curLines) { $script:curLines.Add($l) }
+    }
+    & $flush
+}
+$baselineText = if ($d.Baseline) { [string]$d.Baseline } elseif ($d.BaseCommit) { "commit $($d.BaseCommit)" } else { 'the previous version' }
+
 # ---------------------------------------------------------------- sections
 $sec = New-Object System.Collections.Generic.List[string]
 $n = 0
@@ -135,7 +173,7 @@ $kv = @(
     @('Build', ((Badge $s.BuildResult $s.BuildResult) + ' ' + (E $s.DllPath))),
     @('Assembly size', (E $s.DllSize)),
     @('Version / signature', $(if ($s.DllVersion -or $s.PublicKeyToken) { E ("{0} - public key token {1}" -f $s.DllVersion, $(if ($s.PublicKeyToken) { $s.PublicKeyToken } else { 'none (not signed)' })) } else { '' })),
-    @('Git baseline', (E $s.GitBaseline)),
+    @('Baseline', (E $(if ($s.GitBaseline) { $s.GitBaseline } else { $baselineText }))),
     @('Online readiness', (Badge $s.OnlineVerdict $s.OnlineVerdictText))
 )
 $sumHtml = '<table class="kv"><tbody>' + (($kv | ForEach-Object { "<tr><th>$($_[0])</th><td>$($_[1])</td></tr>" }) -join '') + '</tbody></table>'
@@ -160,7 +198,7 @@ if (Has $d.SerializerDecisions) { Add-Section 'Serializer decisions' ('<p class=
 
 # 3. Code diff
 if ($diffBlocks.Count) {
-    $intro = "<p class=""muted small"">Compared with commit $(Code $(if ($d.BaseCommit) { $d.BaseCommit } else { 'HEAD' })). Green = added, red = removed.</p>"
+    $intro = "<p class=""muted small"">Compared with $(E $baselineText). Green = added, red = removed.</p>"
     if ($diffStat) { $intro += "<pre class=""stat"">$(E $diffStat)</pre>" }
     Add-Section 'Code changes (diff)' ($intro + ($diffBlocks -join ''))
 }
@@ -185,6 +223,7 @@ if (Has $d.LeftInPlace) {
 
 # 6. Review items
 $rv = ''
+if (Has $d.AcceptedFindings) { $rv += '<h3>Accepted findings (reviewed by the team)</h3>' + (List $d.AcceptedFindings) }
 if (Has $d.LeftOnPurpose) { $rv += '<h3>Left as-is on purpose</h3>' + (List $d.LeftOnPurpose) }
 if (Has $d.NeedsVerification) { $rv += '<h3>Needs verification</h3>' + (List $d.NeedsVerification) }
 if (Has $d.NeedsDecision) { $rv += '<h3>Needs decision</h3>' + (List $d.NeedsDecision) }
@@ -288,7 +327,7 @@ ul.check { list-style: none; padding-left: 1mm; } ul.check li::before { content:
   <div class="verdict">Build $(Badge $s.BuildResult $s.BuildResult) &nbsp; Online readiness $(Badge $s.OnlineVerdict $s.OnlineVerdictText)</div>
 </div>
 $($sec -join "`n")
-<div class="footer">Generated by the d365-sandbox-migration plugin$(if ($d.SkillVersion) { " v$(E $d.SkillVersion)" }) on $(E $generated). Code changes are shown against commit $(E $(if ($d.BaseCommit) { $d.BaseCommit } else { 'HEAD' })).</div>
+<div class="footer">Generated by the d365-sandbox-migration plugin$(if ($d.SkillVersion) { " v$(E $d.SkillVersion)" }) on $(E $generated). Code changes are shown against $(E $baselineText).</div>
 </body></html>
 "@
 [IO.File]::WriteAllText($htmlPath, $html, (New-Object System.Text.UTF8Encoding($true)))

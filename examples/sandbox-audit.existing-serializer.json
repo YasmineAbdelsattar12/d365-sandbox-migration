@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "target": "online",
+  "report": { "enabled": true, "location": "repo" },
+  "sharedHelperFolder": "Helper/Contoso.Common.Crm.Utilities",
+  "serializer": {
+    "strategy": "existing",
+    "className": "AppSerializer",
+    "files": [
+      "Helper/Contoso.Common.Utilities/AppSerializer.cs",
+      "Helper/Contoso.Common.Utilities/Interfaces/IJsonSerializer.cs"
+    ],
+    "serializeCall": "AppSerializer.Instance.Serialize({value})",
+    "deserializeCall": "AppSerializer.Instance.Deserialize<{type}>({json})",
+    "usings": ["Contoso.Common.Utilities"],
+    "dateStyle": "msajax"
+  },
+  "skipProjects": ["*.Api", "*.Portal", "Contoso.Common.Utilities"],
+  "acceptedFindings": [
+    { "file": "Helper/Logger/Logger.cs", "api": "EventLog", "reason": "Never called from plug-ins - reviewed 2026-11-02" }
+  ]
+}
