@@ -137,8 +137,20 @@ foreach ($sp in @(Get-Prop $raw 'acceptedFindings' @())) {
 $skipProjects = @(Get-Prop $raw 'skipProjects' @())
 $httpTimeout = [int](Get-Prop (Get-Prop $raw 'http' $null) 'timeoutSeconds' 90)
 if ($httpTimeout -lt 1 -or $httpTimeout -gt 110) { $cfgWarnings.Add("http.timeoutSeconds $httpTimeout is outside 1-110; plug-ins are stopped at 120 s - using 90"); $httpTimeout = 90 }
-$knownKeys = @('$schema', 'version', 'target', 'report', 'serializer', 'sharedHelperFolder', 'sharedHelperNamespace', 'skipProjects', 'http', 'acceptedFindings', 'notes')
+$knownKeys = @('$schema', 'version', 'target', 'report', 'serializer', 'sharedHelperFolder', 'sharedHelperNamespace', 'skipProjects', 'http', 'acceptedFindings', 'crm', 'notes')
 $sharedHelperNs = [string](Get-Prop $raw 'sharedHelperNamespace' '')
+$crmSet = Get-Prop $raw 'crm' $null
+if ($crmSet) {
+    $ce = [string](Get-Prop $crmSet 'environment' ''); $ca = [string](Get-Prop $crmSet 'auth' ''); $cu = [string](Get-Prop $crmSet 'url' '')
+    if ($ce -and $ce -notin @('onprem', 'online')) { $cfgErrors.Add("crm.environment must be onprem or online, not '$ce'") }
+    if ($ca -and $ca -notin @('windows', 'credential', 'interactive', 'azcli')) { $cfgErrors.Add("crm.auth must be windows, credential, interactive or azcli, not '$ca'") }
+    if ($ce -eq 'online' -and $ca -in @('windows', 'credential')) { $cfgErrors.Add("crm.auth '$ca' does not work with Dataverse Online - use interactive or azcli") }
+    if ($cu -and $cu -notmatch '^https?://[^/\s]+') { $cfgWarnings.Add("crm.url should start with https:// ('$cu')") }
+    foreach ($pn in $crmSet.PSObject.Properties.Name) {
+        if ($pn -match 'password|secret|token|key') { $cfgErrors.Add("crm.$pn must not be in the settings file - never store passwords, secrets or tokens") }
+        elseif ($pn -notin @('environment', 'url', 'auth')) { $cfgWarnings.Add("Unknown setting 'crm.$pn' (ignored)") }
+    }
+}
 if ($sharedHelperNs -and $sharedHelperNs -notmatch '^[A-Za-z_][\w]*(\.[A-Za-z_][\w]*)*$') { $cfgErrors.Add("sharedHelperNamespace is not a valid C# namespace: '$sharedHelperNs'"); $sharedHelperNs = '' }
 if ($raw) { foreach ($pn in $raw.PSObject.Properties.Name) { if ($knownKeys -notcontains $pn) { $cfgWarnings.Add("Unknown setting '$pn' (ignored)") } } }
 $sharedHelper = Resolve-CfgPath ([string](Get-Prop $raw 'sharedHelperFolder' '')) $cfgDir
@@ -649,16 +661,21 @@ if ($ListProjects) {
             $classes = @{}
             foreach ($cf in $cfs) {
                 if (-not $declCache.ContainsKey($cf.Path)) {
-                    $list = @()
+                    $list = @(); $ver = $null
                     if (Test-Path -LiteralPath $cf.Path) {
-                        foreach ($m in [regex]::Matches([IO.File]::ReadAllText($cf.Path), '(?m)^(?<pre>[^/\r\n]*?)\bclass\s+(?<n>\w+)(?:<[^>]*>)?\s*:\s*(?<b>[^{\r\n]+)')) {
+                        $txt = [IO.File]::ReadAllText($cf.Path)
+                        $nsm = [regex]::Match($txt, '(?m)^\s*namespace\s+([\w\.]+)')
+                        $ns = if ($nsm.Success) { $nsm.Groups[1].Value } else { '' }
+                        foreach ($m in [regex]::Matches($txt, '(?m)^(?<pre>[^/\r\n]*?)\bclass\s+(?<n>\w+)(?:<[^>]*>)?\s*:\s*(?<b>[^{\r\n]+)')) {
                             $bases = @($m.Groups['b'].Value -split ',' | ForEach-Object { (($_.Trim() -split '<')[0] -split '\.')[-1].Trim() } | Where-Object { $_ -and $_ -ne 'where' })
-                            $list += [pscustomobject]@{ Name = $m.Groups['n'].Value; Bases = $bases; Abstract = [bool]($m.Groups['pre'].Value -match '\babstract\b') }
+                            $list += [pscustomobject]@{ Name = $m.Groups['n'].Value; Namespace = $ns; Bases = $bases; Abstract = [bool]($m.Groups['pre'].Value -match '\babstract\b') }
                         }
+                        $vm = [regex]::Match($txt, '(?m)^\s*\[\s*assembly\s*:\s*AssemblyVersion(?:Attribute)?\s*\(\s*"([^"]+)"')
+                        if ($vm.Success) { $ver = $vm.Groups[1].Value }
                     }
-                    $declCache[$cf.Path] = $list
+                    $declCache[$cf.Path] = [pscustomobject]@{ Classes = $list; Version = $ver }
                 }
-                foreach ($dcl in $declCache[$cf.Path]) { $classes[$dcl.Name] = $dcl }
+                foreach ($dcl in $declCache[$cf.Path].Classes) { $classes[$dcl.Name] = $dcl }
             }
             $kindOf = {
                 param($name, $d)
@@ -669,8 +686,18 @@ if ($ListProjects) {
                 foreach ($b in $cb.Bases) { $k = & $kindOf $b ($d + 1); if ($k) { return $k } }
                 return $null
             }
-            $np = 0; $nw = 0
-            foreach ($cn in $classes.Keys) { if ($classes[$cn].Abstract) { continue }; $k = & $kindOf $cn 0; if ($k -eq 'Plugin') { $np++ } elseif ($k -eq 'WorkflowActivity') { $nw++ } }
+            $np = 0; $nw = 0; $entryTypes = New-Object System.Collections.Generic.List[string]
+            foreach ($cn in $classes.Keys) {
+                if ($classes[$cn].Abstract) { continue }
+                $k = & $kindOf $cn 0
+                if ($k -eq 'Plugin') { $np++ } elseif ($k -eq 'WorkflowActivity') { $nw++ }
+                if ($k) { $entryTypes.Add($(if ($classes[$cn].Namespace) { $classes[$cn].Namespace + '.' + $cn } else { $cn })) }
+            }
+            $asmName = (Get-XmlNodes $px 'AssemblyName' | Select-Object -First 1).InnerText
+            if (-not $asmName) { $asmName = $pf.BaseName }
+            $asmVer = $null
+            foreach ($cf in $cfs) { if ($declCache[$cf.Path].Version) { $asmVer = $declCache[$cf.Path].Version; break } }
+            if (-not $asmVer) { $vn = Get-XmlNodes $px 'AssemblyVersion' | Select-Object -First 1; if (-not $vn) { $vn = Get-XmlNodes $px 'Version' | Select-Object -First 1 }; if ($vn) { $asmVer = $vn.InnerText.Trim() } }
             $fw = (Get-XmlNodes $px 'TargetFrameworkVersion' | Select-Object -First 1).InnerText
             if (-not $fw) { $fw = (Get-XmlNodes $px 'TargetFramework' | Select-Object -First 1).InnerText }
             if (-not $fw) { $fw = (Get-XmlNodes $px 'TargetFrameworks' | Select-Object -First 1).InnerText }
@@ -682,7 +709,8 @@ if ($ListProjects) {
             if ($sdkAttr -match 'Web' -or $pf.BaseName -match '(?i)(\bApi\b|\.Api$|Portal|\bWeb\b|\.Web$|Tests?$|UnitTest|Console)' -or $outType -match '(?i)exe') { $hint = 'likely full trust (API / Portal / web / test / console) - suggest skipProjects' }
             $skipped = [bool]($skipProjects | Where-Object { $pf.BaseName -like $_ })
             $rows.Add([pscustomobject]@{
-                Name = $pf.BaseName; Path = (Get-RelToRoot $pf.FullName); Style = $(if ($sdkAttr) { 'sdk' } else { 'legacy' })
+                Name = $pf.BaseName; Path = (Get-RelToRoot $pf.FullName); FullPath = $pf.FullName; Style = $(if ($sdkAttr) { 'sdk' } else { 'legacy' })
+                AssemblyName = $asmName; AssemblyVersion = $asmVer; EntryTypes = @($entryTypes | Sort-Object)
                 TargetFramework = $fw; Kind = $kind; Plugins = $np; WorkflowActivities = $nw
                 CompiledFiles = $cfs.Count; LinkedFiles = @($cfs | Where-Object { $_.Source -ne 'local' }).Count
                 LinkedFromFolders = $linkedDirs; Hint = $hint; Skipped = $skipped

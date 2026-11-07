@@ -27,10 +27,13 @@ Built to work for **any team and any repository layout**: each team can describe
 | `/d365-sandbox-migration:sandbox-audit` | **Migrate** — scan, fix, build, verify, online readiness, summary, optional PDF | Yes |
 | `/d365-sandbox-migration:sandbox-audit report` | **Report only** — the same analysis and summary, listing what *would* change. Good for estimating effort or a review with the tech lead | No |
 | `/d365-sandbox-migration:sandbox-audit setup` | **Setup** — creates or updates `sandbox-audit.json` for the repository | No |
+| `/d365-sandbox-migration:sandbox-audit inventory` | **CRM inventory** — asks on-premises or Online, connects (read-only) and reports how many custom plug-in assemblies are registered, which are **None** and which **Sandbox**, which have **no source code** in the repo, which projects are **not registered**, version / class differences and Disk / GAC storage. Optional PDF | No (reads only) |
 | `/d365-sandbox-migration:sandbox-audit batch report D:\Repo\Crm\Cs` | **Batch report** — every project under the folder: effort, online estimate, shared files to decide first, recommended order, one combined PDF | No |
 | `/d365-sandbox-migration:sandbox-audit batch D:\Repo\Crm\Cs` | **Batch migrate** — the projects one after another (each in its own sub-agent), shared files decided once, one commit per project if you allow it, progress saved so it can resume, one combined report | Yes |
 
-You can also just say "migrate this project to sandbox", "audit my plugins for sandbox", "is this project ready for Dataverse Online?".
+Batch modes offer to start with the CRM inventory, and put it first in the combined report.
+
+You can also just say "which assemblies are registered in CRM?", "migrate this project to sandbox", "audit my plugins for sandbox", "is this project ready for Dataverse Online?".
 
 ## Team settings (`sandbox-audit.json`)
 
@@ -45,12 +48,14 @@ One optional file per repository. Everything in it is described in [`skills/sand
 | `sharedHelperNamespace` | `Contoso.Crm.Common` | Namespace for new shared helper files |
 | `skipProjects` | `["*.Api", "*.Portal", "*.Tests"]` | Never migrate or suggest full-trust projects |
 | `http.timeoutSeconds` | `60` | Timeout put on outbound HTTP calls |
+| `crm` | `{ "environment": "onprem", "url": "https://crm.contoso.local/Contoso", "auth": "windows" }` | Inventory mode connects without asking. Never put passwords here |
 | `acceptedFindings` | `{ "file": "Shared/Logger.cs", "api": "EventLog", "reason": "..." }` | Findings the team reviewed and accepted — reported as *Accepted* (with the reason), not fixed |
 
 Findings can also be accepted inline: `// sandbox-ignore: reason` on the same line or the line above.
 
 ## What it does
 
+0. **CRM inventory (optional, read-only)** — on-premises (Windows login, another account, or login window) or Dataverse Online (Microsoft login window or Azure CLI); lists every custom plug-in assembly with isolation mode, storage, classes and steps, and matches it to the source projects by assembly name or class names. Passwords are never typed into the chat or saved
 1. **Finds every compiled file** — local, linked (`<Link>`), wildcard and shared-project (`.projitems`) files, legacy and SDK-style projects — and shows which other projects link each shared file
 2. **Checks version control first** (git or TFVC) so each project's migration can be reviewed and reverted on its own
 3. **Fixes live violations only** — blocked APIs in methods nothing calls are left alone with evidence; shared files linked by many projects are never edited silently
@@ -67,6 +72,7 @@ Findings can also be accepted inline: `// sandbox-ignore: reason` on the same li
 - **Windows** with **PowerShell 5.1+** (built in)
 - **Visual Studio 2017+** or **Build Tools for Visual Studio** (".NET desktop build tools") — the build script finds MSBuild itself
 - **Microsoft Edge** or Chrome for the PDF report (Edge is on every Windows PC; without it you get the HTML report)
+- For the CRM inventory: a CRM account that can read plug-in registrations (e.g. System Customizer). For the login window option (all Online, on-premises IFD): the `Microsoft.Xrm.Data.PowerShell` module — the skill asks before installing it
 - **git** or **TFVC** recommended (works without version control, with a warning)
 
 ## Coverage
@@ -114,6 +120,7 @@ https://github.com/YasmineAbdelsattar12/d365-sandbox-migration
 
 ## Changelog
 
+- **1.9.0** — **CRM inventory** (`inventory` mode, and optionally at the start of batch modes): asks on-premises or Online, connects read-only (`crm-inventory.ps1`: Web API with Windows login or another account, Microsoft.Xrm.Data.PowerShell login window, or Azure CLI token), lists registered custom assemblies (None / Sandbox, Database / Disk / GAC, classes, steps) and compares them with the repository: registered without source (managed or unmanaged), source not registered, version and class differences, possibly unused assemblies; `make-report.ps1 -Inventory` (own PDF, or first sections of the batch report, or one row in a project report); new `crm` setting (never passwords); `scan.ps1 -ListProjects` now gives each project's assembly name, version and class full names
 - **1.8.0** — Batch mode for a whole folder (e.g. `Crm\Cs`): `batch-scan.ps1` scans every project (effort and online estimates, shared problem files, recommended order, skipped projects with reasons); **batch report** (no code changes, combined PDF) and **batch migrate** (shared files decided once, one sub-agent per project, optional commit per project, progress file with resume, decisions collected at the end, combined PDF with per-project results)
 - **1.7.3** — Report footer: "D365 Sandbox Migration tool created and owned by Yasmine Abdelsattar · © 2026. All rights reserved."
 - **1.7.2** — Report footer shows only the copyright line

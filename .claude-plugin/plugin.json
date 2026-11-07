@@ -1,7 +1,7 @@
 {
   "name": "d365-sandbox-migration",
-  "version": "1.8.0",
-  "description": "Migrate Dynamics 365 / Dataverse plug-in and workflow activity projects from Isolation Mode = None (full trust) to Sandbox, and check Dataverse Online readiness. Works for any team: per-repo settings, setup and report-only modes, git and TFVC, builtin or team serializer, PDF report.",
+  "version": "1.9.0",
+  "description": "Migrate Dynamics 365 / Dataverse plug-in and workflow activity projects from Isolation Mode = None (full trust) to Sandbox, and check Dataverse Online readiness. Works for any team: per-repo settings, setup, report-only, batch and CRM inventory modes (on-premises or Online), git and TFVC, builtin or team serializer, PDF report.",
   "author": {
     "name": "Yasmine Abdelsattar"
   },

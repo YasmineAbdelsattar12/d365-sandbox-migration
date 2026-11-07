@@ -25,6 +25,7 @@ param(
     [string]$Data,                 # single project: report-data.json
     [string]$BatchData,            # batch: JSON from batch-scan.ps1
     [string]$BatchProgress,        # batch migrate: progress file with per-project results (see references/batch.md)
+    [string]$Inventory,            # CRM inventory JSON from crm-inventory.ps1 (alone = inventory report; with -BatchData = first sections)
     [string]$Scan,
     [string]$Repo,
     [Parameter(Mandatory = $true)][string]$OutDir,
@@ -75,9 +76,18 @@ function List($items) {
 function Code([string]$s) { return "<code>$(E $s)</code>" }
 
 # ---------------------------------------------------------------- load inputs
-if (-not $Data -and -not $BatchData) { throw 'Pass -Data (one project) or -BatchData (batch)' }
-$bd = $null; $bp = $null
-if ($BatchData) {
+if (-not $Data -and -not $BatchData -and -not $Inventory) { throw 'Pass -Data (one project), -BatchData (batch) or -Inventory (CRM inventory)' }
+$bd = $null; $bp = $null; $inv = $null
+if ($Inventory) { $inv = Get-Content -LiteralPath $Inventory -Raw -Encoding UTF8 | ConvertFrom-Json }
+$invHost = $null
+if ($inv) { try { $invHost = (New-Object System.Uri($inv.Url)).Host } catch { $invHost = [string]$inv.Url } }
+$invEnvText = if ($inv -and $inv.Environment -eq 'online') { 'Dataverse Online' } elseif ($inv) { 'On-premises' } else { $null }
+if ($inv -and -not $Data -and -not $BatchData) {
+    $d = [pscustomobject]@{
+        Project = ('CRM inventory - ' + $invHost); Assembly = $null; Target = $invEnvText; Author = $null; SkillVersion = $null; Baseline = $null
+        Summary = [pscustomobject]@{ BuildResult = ''; OnlineVerdict = ''; OnlineVerdictText = '' }
+    }
+} elseif ($BatchData) {
     $bd = Get-Content -LiteralPath $BatchData -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($BatchProgress -and (Test-Path -LiteralPath $BatchProgress)) { $bp = Get-Content -LiteralPath $BatchProgress -Raw -Encoding UTF8 | ConvertFrom-Json }
     $d = [pscustomobject]@{
@@ -96,7 +106,7 @@ $project = if ($d.Project) { $d.Project } elseif ($scanJson) { $scanJson.Project
 $stamp = Get-Date -Format 'yyyyMMdd-HHmm'
 if (-not (Test-Path -LiteralPath $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
 $OutDir = (Resolve-Path -LiteralPath $OutDir).Path
-$base = Join-Path $OutDir ("{0}-sandbox-migration-{1}" -f ($project -replace '[^\w\.\-]', '_'), $stamp)
+$base = if ($inv -and -not $Data -and -not $BatchData) { Join-Path $OutDir ("crm-inventory-{0}-{1}" -f ($invHost -replace '[^\w\.\-]', '_'), $stamp) } else { Join-Path $OutDir ("{0}-sandbox-migration-{1}" -f ($project -replace '[^\w\.\-]', '_'), $stamp) }
 $htmlPath = "$base.html"; $pdfPath = "$base.pdf"
 $s = $d.Summary
 
@@ -181,6 +191,89 @@ $baselineText = if ($d.Baseline) { [string]$d.Baseline } elseif ($d.BaseCommit) 
 $sec = New-Object System.Collections.Generic.List[string]
 $n = 0
 function Add-Section([string]$title, [string]$body) { $script:n++; $script:sec.Add("<section><h2><span class=""num"">$($script:n)</span>$(E $title)</h2>$body</section>") }
+
+
+# ---------------------------------------------------------------- CRM inventory sections
+function Dt($v) {
+    if ($null -eq $v -or "$v" -eq '') { return '' }
+    [datetime]$t = [datetime]::MinValue
+    if ($v -is [datetime]) { $t = $v } elseif (-not [datetime]::TryParse([string]$v, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$t)) { return [string]$v }
+    return $t.ToString('dd MMM yyyy, HH:mm', [Globalization.CultureInfo]::InvariantCulture)
+}
+function ProjName([string]$path) { return ([IO.Path]::GetFileNameWithoutExtension(($path -replace '\\', '/'))) }
+function Add-InventorySections($iv, [string]$onlyAssembly) {
+    $isoBadge = { param($a) switch ([int]$a.IsolationMode) { 1 { Badge 'warn' 'None' } 2 { Badge 'ok' 'Sandbox' } default { "<span class=""badge info"">$(E $a.Isolation)</span>" } } }
+    $srcBadge = { param($a) if ([int]$a.SourceType -in @(1, 2)) { Badge 'fail' $a.Source } else { E $a.Source } }
+    if (-not $iv.Connected) {
+        $b = '<table class="kv"><tbody>' + "<tr><th>Organization</th><td>$(Code $iv.Url)</td></tr><tr><th>Environment</th><td>$(E $invEnvText)</td></tr><tr><th>Sign-in</th><td>$(E $iv.Auth)</td></tr><tr><th>Error</th><td>$(E $iv.Error)</td></tr>"
+        if ($iv.ErrorHint) { $b += "<tr><th>What to check</th><td>$(E $iv.ErrorHint)</td></tr>" }
+        Add-Section 'CRM registrations - connection failed' ($b + '</tbody></table>')
+        return
+    }
+    $all = @(Arr $iv.Assemblies)
+    if ($onlyAssembly) {
+        $all = @($all | Where-Object { $_.Name -eq $onlyAssembly })
+        if (-not $all.Count) { Add-Section 'Registration in CRM' "<p>Assembly $(Code $onlyAssembly) is <strong>not registered</strong> in $(Code $iv.Url).</p>"; return }
+        $rows = foreach ($a in $all) { , @(((Code $a.Name) + "<div class=""muted small"">$(E $a.Version)</div>"), (& $isoBadge $a), (& $srcBadge $a), (E ("{0} / {1}" -f $a.StepsEnabled, ($a.StepsEnabled + $a.StepsDisabled))), (List $a.Notes)) }
+        Add-Section 'Registration in CRM' ("<p class=""muted small"">$(E $iv.Url) ($(E $invEnvText)), read $(E (Dt $iv.Generated)).</p>" + '<div class="inv">' + (Table @('Assembly', 'Isolation', 'Stored', 'Steps enabled / total', 'Notes') $rows) + '</div>')
+        return
+    }
+    $c = $iv.Counts
+    $hasSrc = $null -ne $c.WithoutSource
+    $kv = New-Object System.Collections.Generic.List[object]
+    $kv.Add(@('Organization', (Code $iv.Url)))
+    $kv.Add(@('Environment', (E $invEnvText)))
+    $kv.Add(@('Read', (E ("{0} via {1} - read-only" -f (Dt $iv.Generated), $iv.Method))))
+    $kv.Add(@('Custom plug-in assemblies', ("<strong>$(E $c.Assemblies)</strong> &nbsp; " + (Badge 'warn' "$($c.IsolationNone) None") + ' ' + (Badge 'ok' "$($c.Sandbox) Sandbox") + $(if ($c.External) { " <span class=""badge info"">$($c.External) External</span>" } else { '' }))))
+    $kv.Add(@('Stored', ((E "$($c.Database) in the Database") + $(if ($c.DiskOrGac) { ' ' + (Badge 'fail' "$($c.DiskOrGac) on Disk / GAC") } else { '' }))))
+    if ($c.Managed) { $kv.Add(@('From managed solutions', (E "$($c.Managed) (Microsoft, ISV or another team - not migrated by this tool)"))) }
+    $kv.Add(@('Classes', (E ("{0} plug-ins, {1} workflow activities" -f $c.PluginTypes, $c.WorkflowActivities))))
+    $kv.Add(@('Steps', (E ("{0} enabled, {1} disabled" -f $c.StepsEnabled, $c.StepsDisabled))))
+    if ($hasSrc) {
+        $kv.Add(@('Compared with source', (E ("{0} projects in {1}" -f $c.SourceProjects, $iv.SolutionRoot))))
+        $kv.Add(@('Registered, with source', (Badge 'ok' "$($c.WithSource)")))
+        $kv.Add(@('Registered, no source in repo', $(if ($c.WithoutSource) { Badge 'fail' "$($c.WithoutSource)" } else { Badge 'ok' '0' })))
+        $kv.Add(@('Source, not registered', $(if ($c.NotRegistered) { Badge 'warn' "$($c.NotRegistered)" } else { Badge 'ok' '0' })))
+        $kv.Add(@('Version / class differences', (E ("{0} / {1}" -f $c.VersionDifferences, $c.ClassDifferences))))
+    } else { $kv.Add(@('Compared with source', '<span class="muted">Not compared (no repository folder given)</span>')) }
+    $b = '<table class="kv"><tbody>' + (($kv | ForEach-Object { "<tr><th>$($_[0])</th><td>$($_[1])</td></tr>" }) -join '') + '</tbody></table>'
+    $b += '<p class="muted small">Read directly from the organization (plug-in assemblies, plug-in types and steps) - nothing was changed there. Isolation None assemblies must move to Sandbox before Dataverse Online; Disk / GAC assemblies must be registered in the Database.</p>'
+    Add-Section 'CRM registrations - overview' $b
+
+    $rows = foreach ($a in $all) {
+        $srcCell = if (Has $a.MatchedProjects) { ((Arr $a.MatchedProjects) | ForEach-Object { Code (ProjName $_) }) -join '<br>' } elseif ($hasSrc) { Badge 'fail' 'No source' } else { '<span class="muted">-</span>' }
+        $notes = @(Arr $a.Notes | Where-Object { $_ -notmatch '^Isolation None|^Stored on|^No source' })
+        , @(((Code $a.Name) + "<div class=""muted small"">$(E $a.Version)$(if ($a.IsManaged) { ' &middot; managed' })</div>"), (& $isoBadge $a), (& $srcBadge $a),
+            (E ("{0} / {1}" -f @(Arr $a.PluginTypes).Count, @(Arr $a.WorkflowActivities).Count)), (E ("{0} / {1}" -f $a.StepsEnabled, ($a.StepsEnabled + $a.StepsDisabled))), $srcCell, $(if ($notes.Count) { List $notes } else { '' }))
+    }
+    Add-Section 'Registered assemblies' ('<p class="muted small">Isolation None first. Classes = plug-ins / workflow activities; steps = enabled / total.</p><div class="inv">' + (Table @('Assembly', 'Isolation', 'Stored', 'Classes', 'Steps', 'Source project', 'Notes') $rows) + '</div>')
+
+    if ($hasSrc) {
+        $ns = @($all | Where-Object { $_.Match -eq 'none' })
+        if ($ns.Count) {
+            $rows = foreach ($a in $ns) { , @((Code $a.Name), (E $a.Version), (& $isoBadge $a), (E $(if ($a.IsManaged) { 'Managed solution - Microsoft, ISV or another team' } else { 'Unmanaged - source may be in another repository, branch or lost' })), (E (Dt $a.ModifiedOn))) }
+            Add-Section 'Registered, but no source code in this repository' ('<p class="muted small">Find the source (another repository or branch, a vendor, a decompiled copy) or confirm the assembly is no longer needed before go-live.</p>' + (Table @('Assembly', 'Version', 'Isolation', 'Likely origin', 'Last modified') $rows))
+        }
+        if (Has $iv.NotRegistered) {
+            $rows = foreach ($p in (Arr $iv.NotRegistered)) { , @((Code $p.Path), (E $p.Kind), (Code $p.AssemblyName), (E ((Arr $p.EntryTypes) -join ', '))) }
+            Add-Section 'Source code, but not registered in this organization' ('<p class="muted small">Projects with plug-in or workflow activity classes that no registered assembly matches (by assembly name or class names). New work, retired code, or registered in another organization.</p>' + (Table @('Project', 'Kind', 'Assembly name', 'Classes') $rows))
+        }
+        $df = @($all | Where-Object { $_.VersionDiff -or (Has $_.ClassesNotInCode) -or (Has $_.ClassesNotRegistered) -or $_.Match -like 'class names*' })
+        if ($df.Count) {
+            $rows = foreach ($a in $df) {
+                $items = @()
+                if ($a.Match -like 'class names*') { $items += 'Assembly name differs from the project - matched by class names' }
+                if ($a.VersionDiff) { $items += "Version $($a.Version) in CRM vs $($a.SourceVersion) in code - $($a.VersionDiff)" }
+                if (Has $a.ClassesNotInCode) { $items += 'Registered but not in the code: ' + ((Arr $a.ClassesNotInCode) -join ', ') }
+                if (Has $a.ClassesNotRegistered) { $items += 'In the code but not registered: ' + ((Arr $a.ClassesNotRegistered) -join ', ') }
+                , @((Code $a.Name), (((Arr $a.MatchedProjects) | ForEach-Object { Code (ProjName $_) }) -join '<br>'), (List $items))
+            }
+            Add-Section 'Differences between CRM and code' ('<div class="inv2">' + (Table @('Assembly', 'Project', 'Difference') $rows) + '</div>')
+        }
+    }
+}
+
+if ($inv -and -not $Data) { Add-InventorySections $inv '' }
 
 if ($bd) {
     # ================================================================ batch report
@@ -273,7 +366,7 @@ if ($bd) {
         $rows = foreach ($r in $sk) { , @((Code $r.Name), (E $(if ($r.Error) { 'Error: ' + $r.Error } else { $r.SkipReason }))) }
         Add-Section 'Skipped projects' (Table @('Project', 'Reason') $rows)
     }
-} else {
+} elseif ($Data) {
 
 # 1. Summary
 $kv = @(
@@ -295,6 +388,7 @@ if ($scanJson) {
     $sumHtml += "<p class=""muted small"">Scanner: $($c.Hits) pattern hits in $($c.FilesWithHits) files - Blocked $($c.Blocked), Avoid $($c.Avoid), Review $($c.Review), HTTP $($c.Harden).</p>"
 }
 Add-Section 'Summary' $sumHtml
+if ($inv) { Add-InventorySections $inv ([string]$d.Assembly) }
 
 # 2. Changes made
 if (Has $d.Changes) {
@@ -433,18 +527,20 @@ pre span { display: block; } pre .a { background: #e6ffed; color: #0e5c2f; } pre
 pre.stat { background: #f8fafc; border: 1px solid #d9e2ec; border-radius: 1.5mm; margin-bottom: 3mm; }
 ul.check { list-style: none; padding-left: 1mm; } ul.check li::before { content: "\2610  "; color: #52606d; }
 .owner { color: #1d4e89; }
+.inv td:nth-child(1) { width: 25%; } .inv td:nth-child(6) { width: 18%; } .inv td code, .inv2 td code { overflow-wrap: break-word; word-break: normal; } .inv2 td:nth-child(1) { width: 25%; } .inv2 td:nth-child(2) { width: 20%; }
 .footer { margin-top: 10mm; padding-top: 2mm; border-top: 1px solid #d9e2ec; color: #7b8794; font-size: 8.5pt; }
 </style></head>
 <body>
 <div class="cover">
-  <div class="kicker">D365 Sandbox Migration Report$(if ($bd) { ' &middot; Batch' })</div>
+  <div class="kicker">D365 Sandbox Migration Report$(if ($bd) { ' &middot; Batch' } elseif ($inv -and -not $Data) { ' &middot; CRM Inventory' })</div>
   <h1>$(E $project)</h1>
-$(if ($bd) { "  <div class=""meta"">$(E $bd.Folder) &nbsp;&middot;&nbsp; $(if ($d.Target) { "Target: $(E $d.Target) &nbsp;&middot;&nbsp; " })$(E $generated)$(if ($d.Author) { " &nbsp;&middot;&nbsp; Prepared by $(E $d.Author)" })</div>
+$(if ($inv -and -not $Data -and -not $bd) { "  <div class=""meta"">$(E $inv.Url) &nbsp;&middot;&nbsp; $(E $invEnvText) &nbsp;&middot;&nbsp; $(E $generated)</div>
+  <div class=""verdict"">$(if ($inv.Connected) { "$(E $inv.Counts.Assemblies) custom assemblies &nbsp; $(Badge 'warn' "$($inv.Counts.IsolationNone) None") $(Badge 'ok' "$($inv.Counts.Sandbox) Sandbox")$(if ($null -ne $inv.Counts.WithoutSource) { ' ' + (Badge 'fail' "$($inv.Counts.WithoutSource) without source") + ' ' + (Badge 'warn' "$($inv.Counts.NotRegistered) not registered") })" } else { Badge 'fail' 'Connection failed' })</div>" } elseif ($bd) { "  <div class=""meta"">$(E $bd.Folder) &nbsp;&middot;&nbsp; $(if ($d.Target) { "Target: $(E $d.Target) &nbsp;&middot;&nbsp; " })$(E $generated)$(if ($d.Author) { " &nbsp;&middot;&nbsp; Prepared by $(E $d.Author)" })</div>
   <div class=""verdict"">$(E $bd.Counts.InBatch) projects in this batch &nbsp; $(Badge 'ok' "$($bd.Counts.OnlineOk) ready") $(Badge 'warn' "$($bd.Counts.OnlineWarn) needs work") $(Badge 'fail' "$($bd.Counts.OnlineFail) blocked")</div>" } else { "  <div class=""meta"">Assembly $(E $d.Assembly) &nbsp;&middot;&nbsp; Target: $(E $d.Target) &nbsp;&middot;&nbsp; $(E $generated)$(if ($d.Author) { " &nbsp;&middot;&nbsp; Prepared by $(E $d.Author)" })</div>
   <div class=""verdict"">Build $(Badge $s.BuildResult $s.BuildResult) &nbsp; Online readiness $(Badge $s.OnlineVerdict $s.OnlineVerdictText)</div>" })
 </div>
 $($sec -join "`n")
-<div class="footer">Generated by the d365-sandbox-migration plugin$(if ($d.SkillVersion) { " v$(E $d.SkillVersion)" }) on $(E $generated). $(if (-not $bd) { "Code changes are shown against $(E $baselineText)." })<br>
+<div class="footer">Generated by the d365-sandbox-migration plugin$(if ($d.SkillVersion) { " v$(E $d.SkillVersion)" }) on $(E $generated). $(if ($Data) { "Code changes are shown against $(E $baselineText)." })<br>
 <span class="owner">$(E $ToolName) tool created and owned by <strong>$(E $ToolOwner)</strong> &middot; &copy; $(E $ToolYear). All rights reserved.</span></div>
 </body></html>
 "@

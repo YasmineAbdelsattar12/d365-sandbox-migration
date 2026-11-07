@@ -10,6 +10,7 @@ Read this when Step 0 selects **batch report** or **batch migrate**. The develop
 ## 1. Scan the folder (both modes)
 
 1. Settings, target and report questions as in Step 1 — **once for the whole batch**.
+1. **CRM inventory first (optional)** — ask once: **Start with the CRM inventory?** If yes, follow `inventory.md` section 5: what is registered, None vs Sandbox, no source / not registered. Keep the JSON for the report (`-Inventory`).
 2. Run:
    ```
    powershell -NoProfile -ExecutionPolicy Bypass -File "<skill base dir>\scripts\batch-scan.ps1" -Folder "<folder>" -OutFile "<scratchpad or %TEMP%>\sandbox-batch.json"
@@ -28,7 +29,7 @@ Read this when Step 0 selects **batch report** or **batch migrate**. The develop
 3. Summary in chat: totals, the project table in recommended order, shared files to decide first, what blocks Dataverse Online and where, skipped projects with reasons, and the suggested next step (e.g. "migrate the 6 Low-effort projects first").
 4. PDF (if requested or `report.enabled: true`):
    ```
-   powershell -NoProfile -ExecutionPolicy Bypass -File "<skill base dir>\scripts\make-report.ps1" -BatchData "<sandbox-batch.json>" -OutDir "<report folder>" -Open
+   powershell -NoProfile -ExecutionPolicy Bypass -File "<skill base dir>\scripts\make-report.ps1" -BatchData "<sandbox-batch.json>" [-Inventory "<crm-inventory.json>"] -OutDir "<report folder>" -Open
    ```
 
 ## 3. Batch migrate
@@ -115,6 +116,6 @@ After each sub-agent:
 2. Summary in chat: per-project result table (status, commit, main open item), shared decisions, decisions for the team, projects to rebuild beyond the batch (from shared-file edits), and next steps (register each assembly in Sandbox; test list).
 3. PDF (if requested or `report.enabled: true`):
    ```
-   powershell -NoProfile -ExecutionPolicy Bypass -File "<skill base dir>\scripts\make-report.ps1" -BatchData "<sandbox-batch.json>" -BatchProgress "<progress file>" -OutDir "<report folder>" -Open
+   powershell -NoProfile -ExecutionPolicy Bypass -File "<skill base dir>\scripts\make-report.ps1" -BatchData "<sandbox-batch.json>" -BatchProgress "<progress file>" [-Inventory "<crm-inventory.json>"] -OutDir "<report folder>" -Open
    ```
    For a detailed report of a single project, run the normal Step 9 for it afterwards.

@@ -28,6 +28,9 @@ One optional file per repository that tells the skill how **this team** works. C
 | `skipProjects` | list of project-name patterns (`*` wildcard) | — | Projects that are never migrated or suggested (API, Portal, tests) |
 | `http.timeoutSeconds` | 1–110 | `90` | Timeout set on outbound HTTP calls (the platform stops a plug-in at 120 s) |
 | `acceptedFindings` | list (below) | — | Findings the team reviewed and accepted — they are reported as **Accepted**, not fixed |
+| `crm.environment` | `onprem` / `online` | ask | Inventory mode (`inventory.md`): which kind of organization to connect to |
+| `crm.url` | `https://crm.contoso.local/Contoso` | ask | Inventory mode: the organization address. On-premises `https://<server>/<OrgName>`, Online `https://<org>.crm<N>.dynamics.com` |
+| `crm.auth` | `windows` / `credential` / `interactive` / `azcli` | ask | Inventory mode: how to sign in. **Never** put a password, secret or token in this file — the scanner reports it as an error |
 | `notes` | text or list of texts | — | Free text for the team (ignored by the skill). Use it for explanations — JSON does not allow `//` comments |
 
 ### `acceptedFindings` entries

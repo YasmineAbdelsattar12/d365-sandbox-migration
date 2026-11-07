@@ -19,3 +19,7 @@
 | `OnlineReadiness.HttpCalls[]` | Every HTTP call: `Call`, `UrlExpr`, best-effort `UrlSource` (`Hardcoded` / `Configuration` / `WorkflowInput` / `StepConfig` / `Parameter` / `Relative` / `Unknown`), `UrlKey`, `Url`, `UrlClass`, `InLoop`, `Accepted` |
 | `OnlineReadiness.UrlLiterals[]` | Every hard-coded URL with `Class`: `Blocked` (IP / localhost / protocol), `Internal` (single-label host, `.local`, …), `Avoid` (port), `Review` (plain http), `LooksPublic`, `Unknown`; `Accepted` |
 | `OnlineReadiness.LoopRisks[]` | Organization-service or HTTP calls inside loops (2-minute limit risk) |
+
+## `-ListProjects` output
+
+`scan.ps1 -ListProjects -SolutionRoot <root>` writes `Projects[]`, one per `.csproj`: `Name`, `Path` (relative to the root), `FullPath`, `Kind` (`Plugins` / `WorkflowActivities` / `Mixed` / `Other`), `Framework`, `Hint` (full-trust looking names), `Skipped`, `AssemblyName` (from the `.csproj`, else the file name), `AssemblyVersion` (from `[assembly: AssemblyVersion]` in a compiled file, or the `.csproj` `AssemblyVersion` / `Version`), and `EntryTypes` — the full names (`Namespace.Class`) of every non-abstract plug-in and workflow activity class. `crm-inventory.ps1` uses `AssemblyName` and `EntryTypes` to match registered assemblies with source projects.
