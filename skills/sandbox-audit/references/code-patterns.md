@@ -2,16 +2,25 @@
 
 Reusable patterns for common Sandbox migration scenarios.
 
-## HTTP Hardening (apply to every outbound call)
+## HTTP Hardening
 
-Every `HttpWebRequest`, `WebClient`, or `HttpClient` call in a plugin must follow these rules:
+**What the skill changes on an existing outbound call** (small, mechanical, same behaviour on success):
+
+1. An explicit timeout ≤ 90 s (the platform stops a plug-in at 120 s) — only if the call sets none, or sets more than 110 s
+2. KeepAlive off (`request.KeepAlive = false` / `client.DefaultRequestHeaders.ConnectionClose = true`) — Microsoft guidance for sandboxed calls
+3. `.GetAwaiter().GetResult()` instead of `.Result` / `.Wait()` (see the `AggregateException` exception in `SKILL.md`)
+
+**What the skill never changes, only reports** (under "Left as-is on purpose" in the summary, with the suggested improvement):
+
+- **TLS**: never add, change or remove `ServicePointManager.SecurityProtocol`. Leave an existing line exactly as it is. If a call has no such line, add nothing — the setting is process-wide (it affects other plug-ins in the same worker) and `= Tls12` switches newer TLS versions off. Report existing `SecurityProtocol = ...` assignments as a suggestion ("process-wide; prefer removing it, or `|=`").
+- **Exception types**: do not replace `Exception` / `InvalidOperationException` with `InvalidPluginExecutionException` — callers may catch the original type. Suggest it.
+- **Order of reading the response / status check, tracing**: do not restructure. Suggest it.
+
+The method below is a **reference pattern for new code only**. Do not rewrite existing calls to match it.
 
 ```csharp
 public string CallExternalApi(string url, string payload, ITracingService tracer)
 {
-    // 1. Force TLS 1.2
-    ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
-
     var request = (HttpWebRequest)WebRequest.Create(url);
     request.Method = "POST";
     request.ContentType = "application/json";
@@ -82,15 +91,10 @@ using (var client = new HttpClient())
 }
 ```
 
-### Hardening checklist (every outbound call)
+### Checklist
 
-1. `ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;` before the call
-2. Explicit timeout ≤ 90 s
-3. KeepAlive disabled (`request.KeepAlive = false` / `client.DefaultRequestHeaders.ConnectionClose = true`)
-4. `.GetAwaiter().GetResult()` instead of `.Result` (see the `AggregateException` exception in `SKILL.md`)
-5. Response body read before the status check
-6. `InvalidPluginExecutionException` for failures
-7. DNS host name over HTTPS, anonymous or token auth — no IP addresses, no Windows credentials
+Applied: explicit timeout ≤ 90 s · KeepAlive disabled · `.GetAwaiter().GetResult()` (with the `AggregateException` exception).
+Reported only: TLS setting · exception types · response reading order · DNS host name over HTTPS, anonymous or token auth (no IP addresses, no Windows credentials — see Online readiness).
 
 ## System.Web Replacement: MimeMapping and ParseQueryString
 
@@ -142,9 +146,6 @@ binding.CloseTimeout = TimeSpan.FromSeconds(15);
 
 var endpoint = new EndpointAddress("https://server/Service.svc");
 var client = new MyServiceClient(binding, endpoint);
-
-// Force TLS 1.2
-ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
 
 try
 {

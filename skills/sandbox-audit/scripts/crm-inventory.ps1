@@ -72,7 +72,7 @@ if (-not $MockData) {
 $isoNames = @{ 1 = 'None'; 2 = 'Sandbox'; 3 = 'External' }
 $srcNames = @{ 0 = 'Database'; 1 = 'Disk'; 2 = 'GAC'; 3 = 'AzureWebApp'; 4 = 'FileStore' }
 $apiVersion = if ($Environment -eq 'online') { 'v9.2' } else { 'v9.0' }
-$script:cred = $null; $script:token = $null; $script:conn = $null
+$script:cred = $null; $script:token = $null; $script:conn = $null; $script:urlNote = $null
 
 function Get-ErrorHint([string]$msg) {
     if ($msg -match 'proxy') { return 'A proxy server blocked the request - check the proxy / VPN settings of this machine, or run from a machine on the company network.' }
@@ -149,6 +149,18 @@ try {
         if (-not $script:conn -or -not $script:conn.IsReady) { throw "Login did not complete: $($script:conn.LastCrmError)" }
         $method = 'Microsoft.Xrm.Data.PowerShell login window'
         $who = "$($script:conn.ConnectedOrgFriendlyName)"
+        # the login window lets the user pick any organization: report the one that was really used
+        try {
+            $actual = $script:conn.CrmConnectOrgUriActual
+            if ($actual) {
+                $typedHost = ([Uri]$Url).Host
+                $actualUri = [Uri]"$actual"
+                $actualBase = $actualUri.GetLeftPart([UriPartial]::Authority)
+                $orgSeg = ($actualUri.AbsolutePath.Trim('/') -split '/')[0]
+                if ($orgSeg -and $orgSeg -notmatch '^(XRMServices|api)$') { $actualBase = "$actualBase/$orgSeg" }
+                if ($actualUri.Host -ne $typedHost) { $script:urlNote = "You typed $Url, but the login window connected to $actualBase - the report shows the organization that was really read."; $Url = $actualBase }
+            }
+        } catch { }
         $assembliesRaw = Invoke-FetchAll 'pluginassembly' @('pluginassemblyid', 'name', 'version', 'publickeytoken', 'culture', 'isolationmode', 'sourcetype', 'ismanaged', 'modifiedon') '<filter><condition attribute="customizationlevel" operator="eq" value="1" /></filter>'
         $typesRaw = Invoke-FetchAll 'plugintype' @('plugintypeid', 'typename', 'isworkflowactivity', 'pluginassemblyid') '<filter><condition attribute="customizationlevel" operator="eq" value="1" /></filter>'
         $stepsRaw = Invoke-FetchAll 'sdkmessageprocessingstep' @('sdkmessageprocessingstepid', 'name', 'statecode', 'mode', 'stage', 'eventhandler') '<filter><condition attribute="customizationlevel" operator="eq" value="1" /></filter>'
@@ -325,6 +337,7 @@ $counts = [pscustomobject]@{
 }
 $result = [pscustomobject]@{
     Mode = 'crm-inventory'; Generated = (Get-Date).ToString('s'); Environment = $Environment; Url = $Url; Auth = $Auth; Method = $method
+    ConnectedOrganization = $who; UrlNote = $script:urlNote
     Connected = $connected; Error = $connError; ErrorHint = $connHint; SolutionRoot = $SolutionRoot; ProjectScanError = $projError
     Counts = $counts; Assemblies = $list; NotRegistered = $notRegistered.ToArray()
     ElapsedSeconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
@@ -340,7 +353,8 @@ if (-not $connected) {
     exit 1
 }
 $c = $counts
-Write-Output ("CRM: {0} ({1}) via {2}" -f $Url, $Environment, $method)
+Write-Output ("CRM: {0} ({1}) via {2}{3}" -f $Url, $Environment, $method, $(if ($who -and $who -ne 'connected') { " - organization '$who'" } else { '' }))
+if ($script:urlNote) { Write-Output "  NOTE: $($script:urlNote)" }
 Write-Output ("Custom plug-in assemblies: {0} - {1} isolation None, {2} Sandbox{3} | stored: {4} Database, {5} Disk/GAC | {6} from managed solutions" -f $c.Assemblies, $c.IsolationNone, $c.Sandbox, $(if ($c.External) { ", $($c.External) External" } else { '' }), $c.Database, $c.DiskOrGac, $c.Managed)
 Write-Output ("Classes: {0} plug-ins, {1} workflow activities | steps: {2} enabled, {3} disabled" -f $c.PluginTypes, $c.WorkflowActivities, $c.StepsEnabled, $c.StepsDisabled)
 Write-Output ("Your team's assemblies: {0} - {1} isolation None, {2} Sandbox | Microsoft / vendor (managed, no source here): {3} - {4} isolation None" -f $c.Own, $c.OwnIsolationNone, $c.OwnSandbox, $c.Vendor, $c.VendorIsolationNone)

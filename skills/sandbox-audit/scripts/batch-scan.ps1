@@ -48,6 +48,10 @@ $projects = @(Get-ChildItem -LiteralPath $Folder -Recurse -Filter *.csproj -File
     Where-Object { $_.FullName -notmatch $excludeDirs } | Sort-Object FullName)
 if (-not $projects.Count) { throw "No .csproj files found under $Folder" }
 
+# two projects can have the same file name in different folders: give each its own name and scan file
+$nameCount = @{}
+foreach ($pf in $projects) { $k = $pf.BaseName.ToLowerInvariant(); if ($nameCount.ContainsKey($k)) { $nameCount[$k]++ } else { $nameCount[$k] = 1 } }
+$usedFiles = @{}
 $rows = New-Object System.Collections.Generic.List[object]
 $sharedHits = @{}     # shared file path -> @{ Apis; Projects }
 $settingsInfo = $null
@@ -55,8 +59,13 @@ $i = 0
 foreach ($pf in $projects) {
     $i++
     Write-Progress -Activity 'Sandbox batch scan' -Status $pf.BaseName -PercentComplete ([int](100 * $i / $projects.Count))
-    $scanOut = Join-Path $WorkDir ($pf.BaseName + '.scan.json')
-    $row = [ordered]@{ Name = $pf.BaseName; Path = $pf.FullName; RelativePath = (Get-Rel $pf.FullName); ScanFile = $scanOut; Status = 'scanned'; SkipReason = $null; Error = $null }
+    $rowName = $pf.BaseName
+    if ($nameCount[$pf.BaseName.ToLowerInvariant()] -gt 1) { $rowName = $pf.BaseName + ' [' + (Get-Rel $pf.DirectoryName) + ']' }
+    $fileBase = $pf.BaseName; $n = 2
+    while ($usedFiles.ContainsKey($fileBase.ToLowerInvariant())) { $fileBase = $pf.BaseName + '-' + $n; $n++ }
+    $usedFiles[$fileBase.ToLowerInvariant()] = $true
+    $scanOut = Join-Path $WorkDir ($fileBase + '.scan.json')
+    $row = [ordered]@{ Name = $rowName; ProjectName = $pf.BaseName; Path = $pf.FullName; RelativePath = (Get-Rel $pf.FullName); ScanFile = $scanOut; Status = 'scanned'; SkipReason = $null; Error = $null }
     try {
         $scanArgs = @{ Project = $pf.FullName; OutFile = $scanOut }
         if ($Config) { $scanArgs.Config = $Config }
@@ -80,7 +89,7 @@ foreach ($pf in $projects) {
             if (-not $sharedHits.ContainsKey($h.File)) { $sharedHits[$h.File] = @{ Apis = New-Object System.Collections.Generic.List[string]; Projects = New-Object System.Collections.Generic.List[string]; Members = New-Object System.Collections.Generic.List[string] } }
             $e = $sharedHits[$h.File]
             if (-not $e.Apis.Contains($h.Api)) { $e.Apis.Add($h.Api) }
-            if (-not $e.Projects.Contains($pf.BaseName)) { $e.Projects.Add($pf.BaseName) }
+            if (-not $e.Projects.Contains($rowName)) { $e.Projects.Add($rowName) }
             $mem = "$($h.Member):$($h.Line)"; if ($h.Member -and -not $e.Members.Contains($mem)) { $e.Members.Add($mem) }
         }
 
@@ -88,7 +97,7 @@ foreach ($pf in $projects) {
         $work = (& $sevCount $localLive 'Blocked') + (& $sevCount $localLive 'Avoid') + [math]::Ceiling((& $sevCount $localLive 'Review') / 2)
         $online = 'ok'; $onlineWhy = New-Object System.Collections.Generic.List[string]
         if ($urlProblems.Count) { $online = 'fail'; $onlineWhy.Add("$($urlProblems.Count) IP / internal URL(s)") }
-        if ($o.ContainsWorkflowActivities -and $deps.Count) { $online = 'fail'; $onlineWhy.Add('workflow activities with DLL dependencies: ' + (($deps | ForEach-Object { $_.Name }) -join ', ')) }
+        if ($o.ContainsWorkflowActivities -and $deps.Count) { $online = 'fail'; $onlineWhy.Add('workflow activities with references to check (a real DLL dependency cannot go Online): ' + (($deps | ForEach-Object { $_.Name }) -join ', ')) }
         if ($o.TargetFramework.Status -eq 'Blocked') { $online = 'fail'; $onlineWhy.Add("framework $($o.TargetFramework.Value)") }
         if (@($live | Where-Object { $_.Category -eq 'Auth' -and $_.Severity -eq 'Blocked' }).Count) { $online = 'fail'; $onlineWhy.Add('Windows credentials') }
         if ($online -ne 'fail') {
@@ -96,7 +105,7 @@ foreach ($pf in $projects) {
             if (@($o.LoopRisks).Count) { $online = 'warn'; $onlineWhy.Add("$(@($o.LoopRisks).Count) call(s) inside loops") }
             if ($o.TargetFramework.Status -eq 'Check') { $online = 'warn'; $onlineWhy.Add("framework $($o.TargetFramework.Value)") }
             if ($o.Signing.Status -ne 'Ready') { $online = 'warn'; $onlineWhy.Add('not signed') }
-            if (-not $o.ContainsWorkflowActivities -and $deps.Count) { $online = 'warn'; $onlineWhy.Add('DLL dependencies (plug-in package or remove)') }
+            if (-not $o.ContainsWorkflowActivities -and $deps.Count) { $online = 'warn'; $onlineWhy.Add("$($deps.Count) reference(s) to check - not confirmed by a build: " + (($deps | ForEach-Object { $_.Name }) -join ', ')) }
         }
         $effort = if ($online -eq 'fail' -or $work -gt 10) { 'High' } elseif ($work -gt 0 -or $serializerHits -or $configUrls.Count -or @($o.HttpCalls).Count -gt 3) { 'Medium' } else { 'Low' }
 

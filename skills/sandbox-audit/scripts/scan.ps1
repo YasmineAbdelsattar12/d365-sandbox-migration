@@ -269,6 +269,78 @@ function Get-CompileFiles([string]$file, [bool]$isSdk) {
     return $out
 }
 
+# ---------------------------------------------------------------- class declarations / entry points
+function Get-ClassDecls([string]$text, [string]$file) {
+    # every "class X : bases" in a file, with the namespace it sits in (base list may continue on the next lines)
+    $list = New-Object System.Collections.Generic.List[object]
+    if (-not $text) { return , $list }
+    $t = [regex]::Replace($text, '(?s)/\*.*?\*/', { param($m) $m.Value -replace '[^\r\n]', ' ' })
+    $nsList = @([regex]::Matches($t, '(?m)^[ \t]*namespace\s+([\w\.]+)'))
+    foreach ($m in [regex]::Matches($t, '(?m)^(?<pre>[^/\r\n]*?)\bclass\s+(?<n>\w+)(?:\s*<[^>{;]*>)?\s*:\s*(?<b>[^{;]+)\{')) {
+        $baseText = ($m.Groups['b'].Value -split '\bwhere\b')[0]
+        $bases = @($baseText -split ',' | ForEach-Object { (($_.Trim() -split '<')[0] -split '\.')[-1].Trim() } | Where-Object { $_ })
+        if (-not $bases.Count) { continue }
+        $ns = ''
+        foreach ($n in $nsList) { if ($n.Index -lt $m.Groups['n'].Index) { $ns = $n.Groups[1].Value } else { break } }
+        $name = $m.Groups['n'].Value
+        $list.Add([pscustomobject]@{
+            Name = $name; Namespace = $ns; FullName = $(if ($ns) { "$ns.$name" } else { $name }); Bases = $bases
+            Abstract = [bool]($m.Groups['pre'].Value -match '\babstract\b'); File = $file
+            Line = ($t.Substring(0, $m.Groups['n'].Index) -split "`n").Count
+        })
+    }
+    return , $list
+}
+function Get-EntryTypes($decls) {
+    # plug-in / workflow activity classes: derive from IPlugin / CodeActivity directly or through base classes in the source.
+    # A base class that is not in the source (it comes from a referenced DLL) counts when its name looks like a plug-in / activity base - marked Assumed.
+    $bySimple = @{}
+    foreach ($d in $decls) { if (-not $bySimple.ContainsKey($d.Name)) { $bySimple[$d.Name] = New-Object System.Collections.Generic.List[object] }; $bySimple[$d.Name].Add($d) }
+    $resolve = $null
+    $resolve = {
+        param($d, [int]$depth)
+        if ($depth -gt 12) { return $null }
+        if ($d.Bases -contains 'IPlugin') { return @{ Kind = 'Plugin'; Assumed = $null } }
+        if ($d.Bases[0] -match '^(CodeActivity|AsyncCodeActivity|NativeActivity)$') { return @{ Kind = 'WorkflowActivity'; Assumed = $null } }
+        foreach ($b in $d.Bases) {
+            if ($bySimple.ContainsKey($b)) {
+                $cands = @($bySimple[$b] | Sort-Object @{ Expression = { if ($_.Namespace -eq $d.Namespace) { 0 } else { 1 } } })
+                foreach ($c in $cands) { if ($c.FullName -eq $d.FullName) { continue }; $k = & $resolve $c ($depth + 1); if ($k) { return $k } }
+            }
+            elseif ($b -match '(?i)^(plugin|\w*plugin\w*base\w*|base\w*plugin\w*)$') { return @{ Kind = 'Plugin'; Assumed = $b } }
+            elseif ($b -match '(?i)^(\w*(workflow|codeactivity|activity)\w*base\w*|base\w*(workflow|codeactivity|activity)\w*)$') { return @{ Kind = 'WorkflowActivity'; Assumed = $b } }
+        }
+        return $null
+    }
+    $out = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    foreach ($d in $decls) {
+        if ($d.Abstract -or $seen.ContainsKey($d.FullName)) { continue }
+        $k = & $resolve $d 0
+        if ($k) { $seen[$d.FullName] = $true; $out.Add([pscustomobject]@{ FullName = $d.FullName; Name = $d.Name; Kind = $k.Kind; AssumedFromBase = $k.Assumed; File = $d.File; Line = $d.Line }) }
+    }
+    return , $out
+}
+function Get-CodeParts([string]$line) {
+    # NoComment = the line without a trailing // comment (strings kept); Code = the same with string contents blanked
+    $inStr = $false; $verb = $false; $cut = $line.Length
+    for ($k = 0; $k -lt $line.Length; $k++) {
+        $ch = $line[$k]
+        if ($inStr) {
+            if ($verb) { if ($ch -eq '"') { if ($k + 1 -lt $line.Length -and $line[$k + 1] -eq '"') { $k++ } else { $inStr = $false } } }
+            elseif ($ch -eq '\') { $k++ }
+            elseif ($ch -eq '"') { $inStr = $false }
+            continue
+        }
+        if ($ch -eq '"') { $inStr = $true; $verb = ($k -gt 0 -and $line[$k - 1] -eq '@') -or ($k -gt 1 -and $line[$k - 1] -eq '$' -and $line[$k - 2] -eq '@'); continue }
+        if ($ch -eq "'") { if ($k + 2 -lt $line.Length -and $line[$k + 1] -eq '\') { $k += 3 } else { $k += 2 }; continue }
+        if ($ch -eq '/' -and $k + 1 -lt $line.Length -and $line[$k + 1] -eq '/') { $cut = $k; break }
+    }
+    $nc = $line.Substring(0, $cut)
+    $code = $nc -replace '@"(?:[^"]|"")*"', '""' -replace '"(?:[^"\\]|\\.)*"', '""' -replace "'(?:[^'\\]|\\.)'", "''"
+    return @{ NoComment = $nc; Code = $code }
+}
+
 # ---------------------------------------------------------------- patterns
 # Severity: Blocked = fails in Sandbox if executed | Avoid = unsupported/unreliable in plug-ins
 #           Review  = depends on usage | Harden = allowed, apply HTTP hardening | Using = namespace import only
@@ -658,41 +730,24 @@ if ($ListProjects) {
             $sdkAttr = $px.DocumentElement.GetAttribute('Sdk')
             $script:projDir = $pf.DirectoryName
             $cfs = @(Get-CompileFiles $pf.FullName ([bool]$sdkAttr) | Where-Object { $_.Path -like '*.cs' -and $_.Path -notlike 'UNRESOLVED:*' })
-            $classes = @{}
+            $classes = New-Object System.Collections.Generic.List[object]
             foreach ($cf in $cfs) {
                 if (-not $declCache.ContainsKey($cf.Path)) {
-                    $list = @(); $ver = $null
+                    $list = New-Object System.Collections.Generic.List[object]; $ver = $null
                     if (Test-Path -LiteralPath $cf.Path) {
                         $txt = [IO.File]::ReadAllText($cf.Path)
-                        $nsm = [regex]::Match($txt, '(?m)^\s*namespace\s+([\w\.]+)')
-                        $ns = if ($nsm.Success) { $nsm.Groups[1].Value } else { '' }
-                        foreach ($m in [regex]::Matches($txt, '(?m)^(?<pre>[^/\r\n]*?)\bclass\s+(?<n>\w+)(?:<[^>]*>)?\s*:\s*(?<b>[^{\r\n]+)')) {
-                            $bases = @($m.Groups['b'].Value -split ',' | ForEach-Object { (($_.Trim() -split '<')[0] -split '\.')[-1].Trim() } | Where-Object { $_ -and $_ -ne 'where' })
-                            $list += [pscustomobject]@{ Name = $m.Groups['n'].Value; Namespace = $ns; Bases = $bases; Abstract = [bool]($m.Groups['pre'].Value -match '\babstract\b') }
-                        }
+                        $list = Get-ClassDecls $txt $cf.Path
                         $vm = [regex]::Match($txt, '(?m)^\s*\[\s*assembly\s*:\s*AssemblyVersion(?:Attribute)?\s*\(\s*"([^"]+)"')
                         if ($vm.Success) { $ver = $vm.Groups[1].Value }
                     }
                     $declCache[$cf.Path] = [pscustomobject]@{ Classes = $list; Version = $ver }
                 }
-                foreach ($dcl in $declCache[$cf.Path].Classes) { $classes[$dcl.Name] = $dcl }
+                foreach ($dcl in $declCache[$cf.Path].Classes) { $classes.Add($dcl) }
             }
-            $kindOf = {
-                param($name, $d)
-                if ($d -gt 12 -or -not $classes.ContainsKey($name)) { return $null }
-                $cb = $classes[$name]
-                if ($cb.Bases -contains 'IPlugin') { return 'Plugin' }
-                if ($cb.Bases.Count -and $cb.Bases[0] -match '^(CodeActivity|AsyncCodeActivity|NativeActivity)$') { return 'WorkflowActivity' }
-                foreach ($b in $cb.Bases) { $k = & $kindOf $b ($d + 1); if ($k) { return $k } }
-                return $null
-            }
-            $np = 0; $nw = 0; $entryTypes = New-Object System.Collections.Generic.List[string]
-            foreach ($cn in $classes.Keys) {
-                if ($classes[$cn].Abstract) { continue }
-                $k = & $kindOf $cn 0
-                if ($k -eq 'Plugin') { $np++ } elseif ($k -eq 'WorkflowActivity') { $nw++ }
-                if ($k) { $entryTypes.Add($(if ($classes[$cn].Namespace) { $classes[$cn].Namespace + '.' + $cn } else { $cn })) }
-            }
+            $entries = Get-EntryTypes $classes
+            $np = @($entries | Where-Object { $_.Kind -eq 'Plugin' }).Count; $nw = @($entries | Where-Object { $_.Kind -eq 'WorkflowActivity' }).Count
+            $entryTypes = @($entries | ForEach-Object { $_.FullName })
+            $assumed = @($entries | Where-Object { $_.AssumedFromBase } | ForEach-Object { "$($_.FullName) (base class $($_.AssumedFromBase) is not in the source)" })
             $asmName = (Get-XmlNodes $px 'AssemblyName' | Select-Object -First 1).InnerText
             if (-not $asmName) { $asmName = $pf.BaseName }
             $asmVer = $null
@@ -710,7 +765,7 @@ if ($ListProjects) {
             $skipped = [bool]($skipProjects | Where-Object { $pf.BaseName -like $_ })
             $rows.Add([pscustomobject]@{
                 Name = $pf.BaseName; Path = (Get-RelToRoot $pf.FullName); FullPath = $pf.FullName; Style = $(if ($sdkAttr) { 'sdk' } else { 'legacy' })
-                AssemblyName = $asmName; AssemblyVersion = $asmVer; EntryTypes = @($entryTypes | Sort-Object)
+                AssemblyName = $asmName; AssemblyVersion = $asmVer; EntryTypes = @($entryTypes | Sort-Object); AssumedEntryTypes = $assumed
                 TargetFramework = $fw; Kind = $kind; Plugins = $np; WorkflowActivities = $nw
                 CompiledFiles = $cfs.Count; LinkedFiles = @($cfs | Where-Object { $_.Source -ne 'local' }).Count
                 LinkedFromFolders = $linkedDirs; Hint = $hint; Skipped = $skipped
@@ -748,7 +803,7 @@ $fileRows = New-Object System.Collections.Generic.List[object]
 $httpCalls = New-Object System.Collections.Generic.List[object]
 $urlLiterals = New-Object System.Collections.Generic.List[object]
 $loopRisks = New-Object System.Collections.Generic.List[object]
-$classBases = New-Object 'System.Collections.Generic.Dictionary[string,object]'
+$allDecls = New-Object System.Collections.Generic.List[object]
 $asmVersion = $null; $asmKeyAttr = $null
 foreach ($f in $files.Values) {
     $exists = Test-Path -LiteralPath $f.Path
@@ -756,6 +811,7 @@ foreach ($f in $files.Values) {
     if ($exists) {
         $lines = [IO.File]::ReadAllLines($f.Path)
         $fileText = [string]::Join("`n", $lines)
+        foreach ($dcl in (Get-ClassDecls $fileText $f.Path)) { $allDecls.Add($dcl) }
         $inBlock = $false; $ppStack = New-Object System.Collections.Generic.List[string]
         $member = $null; $memberStart = -1; $memberBase = @{}
         $typeNames = New-Object System.Collections.Generic.List[string]
@@ -785,15 +841,11 @@ foreach ($f in $files.Values) {
             }
 
             # ---- online readiness: structure, loops, URLs, HTTP calls
-            $code = $line -replace '@"(?:[^"]|"")*"', '""' -replace '"(?:[^"\\]|\\.)*"', '""' -replace "'(?:[^'\\]|\\.)'", "''" -replace '//.*$', ''
+            $parts = Get-CodeParts $line
+            $code = $parts.Code; $noComment = $parts.NoComment
             $ct = $code.Trim()
             $inLoop = $false; $loopLine = $null
             foreach ($lp in $loops) { if ($lp.Entered -or ($i -gt $lp.Line -and $ct)) { $inLoop = $true; $loopLine = $lp.Line + 1 } }
-            $cd = $classDeclRx.Match($code)
-            if ($cd.Success) {
-                $bases = @($cd.Groups['b'].Value -split ',' | ForEach-Object { (($_.Trim() -split '<')[0] -split '\.')[-1].Trim() } | Where-Object { $_ -and $_ -ne 'where' })
-                $classBases[$cd.Groups['n'].Value] = [pscustomobject]@{ Bases = $bases; Abstract = [bool]($code -match '\babstract\s+(partial\s+)?class\b'); File = $f.Path; Line = $i + 1 }
-            }
             $av = [regex]::Match($line, '^\s*\[\s*assembly\s*:\s*AssemblyVersion(?:Attribute)?\s*\(\s*"([^"]+)"')
             if ($av.Success -and -not $ppStack.Contains('debug')) { $asmVersion = [pscustomobject]@{ Value = $av.Groups[1].Value; File = $f.Path; Line = $i + 1 } }
             $ak = [regex]::Match($line, '^\s*\[\s*assembly\s*:\s*AssemblyKeyFile(?:Attribute)?\s*\(\s*@?"([^"]*)"')
@@ -847,10 +899,12 @@ foreach ($f in $files.Values) {
                 $loops.Add([pscustomobject]@{ Line = $i; Depth = $depthBefore; Entered = ($depth -gt $depthBefore) })
             }
 
-            if (-not $prefilter.IsMatch($line)) { continue }
+            if (-not $prefilter.IsMatch($noComment)) { continue }
             $isUsing = $t -match '^using\s+[\w\.]+\s*;'
             foreach ($p in $compiled) {
-                if (-not $p.Regex.IsMatch($line)) { continue }
+                # URL / attribute-argument patterns need the string contents; everything else is matched with strings blanked
+                $subject = if ($p.Category -eq 'Network' -or $p.Api -match 'DllImport|COM interop') { $noComment } else { $code }
+                if (-not $p.Regex.IsMatch($subject)) { continue }
                 $count++
                 $acc = if ($lineIgnore) { $lineIgnore } else { Test-Accepted $f.Path $p.Api $p.Category ($i + 1) }
                 $hits.Add([pscustomobject]@{
@@ -931,24 +985,14 @@ $versionInfo = [pscustomobject]@{
 }
 
 # entry points: classes deriving (directly or through base classes) from IPlugin / CodeActivity
-function Get-EntryKind([string]$name, [int]$d) {
-    if ($d -gt 12 -or -not $classBases.ContainsKey($name)) { return $null }
-    $cb = $classBases[$name]
-    if ($cb.Bases -contains 'IPlugin') { return 'Plugin' }
-    if ($cb.Bases.Count -and $cb.Bases[0] -match '^(CodeActivity|AsyncCodeActivity|NativeActivity)$') { return 'WorkflowActivity' }
-    foreach ($b in $cb.Bases) { $k = Get-EntryKind $b ($d + 1); if ($k) { return $k } }
-    return $null
-}
+$entries = Get-EntryTypes $allDecls
 $plugins = New-Object System.Collections.Generic.List[string]; $workflows = New-Object System.Collections.Generic.List[string]
-foreach ($n in $classBases.Keys) {
-    if ($classBases[$n].Abstract) { continue }
-    $k = Get-EntryKind $n 0
-    if ($k -eq 'Plugin') { $plugins.Add($n) } elseif ($k -eq 'WorkflowActivity') { $workflows.Add($n) }
-}
+foreach ($en in $entries) { if ($en.Kind -eq 'Plugin') { $plugins.Add($en.FullName) } else { $workflows.Add($en.FullName) } }
+$assumedEntries = @($entries | Where-Object { $_.AssumedFromBase } | ForEach-Object { [pscustomobject]@{ Class = $_.FullName; Kind = $_.Kind; Base = $_.AssumedFromBase; Note = 'base class is not in the source (referenced DLL) - confirm it is a plug-in / workflow activity base' } })
 
 # dependency candidates (confirm against the compiled DLL after the build)
-$fwRefRx = '^(mscorlib|netstandard|System(\..+)?|Microsoft\.CSharp|Microsoft\.Xrm\.Sdk(\..+)?|Microsoft\.Crm\.Sdk\.Proxy|WindowsBase|Microsoft\.VisualBasic)$'
-$fwPkgRx = '^(Microsoft\.CrmSdk\..+|System\..+|Microsoft\.NETFramework\.ReferenceAssemblies.*|Microsoft\.PowerApps\.MSBuild\..+)$'
+$fwRefRx = '^(mscorlib|netstandard|System(\..+)?|Microsoft\.CSharp|Microsoft\.Xrm\.Sdk(\..+)?|Microsoft\.Crm\.Sdk\.Proxy|Microsoft\.IdentityModel|WindowsBase|Microsoft\.VisualBasic)$'
+$fwPkgRx = '^(Microsoft\.CrmSdk\..+|Microsoft\.IdentityModel|System\..+|Microsoft\.NETFramework\.ReferenceAssemblies.*|Microsoft\.PowerApps\.MSBuild\..+)$'
 $deps = New-Object System.Collections.Generic.List[object]
 foreach ($r in (Get-XmlNodes $projXml 'Reference')) {
     $nm = ($r.GetAttribute('Include') -split ',')[0].Trim()
@@ -970,7 +1014,7 @@ $online = [pscustomobject]@{
     TargetFramework      = $fwInfo
     Signing              = $signing
     AssemblyVersion      = $versionInfo
-    EntryPoints          = [pscustomobject]@{ Plugins = $plugins.ToArray(); WorkflowActivities = $workflows.ToArray() }
+    EntryPoints          = [pscustomobject]@{ Plugins = $plugins.ToArray(); WorkflowActivities = $workflows.ToArray(); Assumed = $assumedEntries }
     ContainsWorkflowActivities = ($workflows.Count -gt 0)
     DependencyCandidates = $deps.ToArray()
     HttpCalls            = $httpCalls.ToArray()
@@ -1118,6 +1162,7 @@ Write-Output ("Framework: {0} [{1}] {2}" -f $fwInfo.Value, $fwInfo.Status, $fwIn
 Write-Output ("Signing:   [{0}] {1} {2}" -f $signing.Status, $signing.Note, $(if ($signing.KeyFile) { "($($signing.KeyFile))" } else { '' }))
 Write-Output ("Version:   {0} - {1}" -f $versionInfo.Value, $versionInfo.Note)
 Write-Output ("Entry points: {0} plug-in(s), {1} workflow activit(ies){2}" -f $plugins.Count, $workflows.Count, $(if ($workflows.Count) { ' -> plug-in packages NOT available; assembly must have no runtime dependencies' } else { '' }))
+foreach ($ae in $assumedEntries) { Write-Output ("  assumed {0}: {1} (base class {2} is not in the source - confirm)" -f $ae.Kind, $ae.Class, $ae.Base) }
 Write-Output ("Dependency candidates (confirm against the compiled DLL): {0}" -f $(if ($deps.Count) { ($deps | ForEach-Object { "$($_.Name) ($($_.Kind))" }) -join ', ' } else { 'none' }))
 Write-Output "HTTP calls (file:line member call -> url source):"
 foreach ($hc in $httpCalls) {

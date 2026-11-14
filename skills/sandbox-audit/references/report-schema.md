@@ -32,7 +32,7 @@ Write the file as **UTF-8**. Every field is optional; empty sections are left ou
 
   "Changes": [
     { "File": "MigrateNotesToDocuments.cs", "Tag": "",
-      "Description": ["JavaScriptSerializer replaced with AppSerializer.Serialize", "TLS 1.2, 90 s timeout, KeepAlive off"],
+      "Description": ["JavaScriptSerializer replaced with AppSerializer.Serialize", "90 s timeout, KeepAlive off"],
       "Lines": "12, 88-104" },
     { "File": "Helper\\...\\Logger.cs", "Tag": "LINKED", "Description": ["..."], "Lines": "..." }
   ],

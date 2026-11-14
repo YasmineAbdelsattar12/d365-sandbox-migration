@@ -16,7 +16,7 @@ Read this when Step 0 selects **batch report** or **batch migrate**. The develop
    powershell -NoProfile -ExecutionPolicy Bypass -File "<skill base dir>\scripts\batch-scan.ps1" -Folder "<folder>" -OutFile "<scratchpad or %TEMP%>\sandbox-batch.json"
    ```
    It runs `scan.ps1` on every `.csproj` under the folder (seconds per project) and writes:
-   - `Projects[]` — per project: `Status` (`scanned` / `skipped` / `error`), `SkipReason`, `Kind`, `Framework`, files, `Blocked` / `Avoid` / `Review` (local files only, accepted findings excluded), `HttpCalls`, `UrlProblems`, `UrlsToConfirm`, `LoopRisks`, `DependencyCandidates`, `Signing`, `Effort` (Low / Medium / High), `OnlineEstimate` (`ok` / `warn` / `fail`) with `OnlineWhy`, and `ScanFile` (the full scanner JSON)
+   - `Projects[]` — per project: `Status` (`scanned` / `skipped` / `error`), `SkipReason`, `Kind`, `Framework`, files, `Blocked` / `Avoid` / `Review` (local files only, accepted findings excluded), `HttpCalls`, `UrlProblems`, `UrlsToConfirm`, `LoopRisks`, `DependencyCandidates` (`.csproj` references to check — **not** confirmed dependencies), `Signing`, `Effort` (Low / Medium / High), `OnlineEstimate` (`ok` / `warn` / `fail`) with `OnlineWhy`, and `ScanFile` (the full scanner JSON)
    - `SharedProblems[]` — linked / shared files with blocked APIs that several projects in the batch compile: `File`, `Apis`, `Members`, `Projects`
    - `RecommendedOrder` — easy projects first
    Skipped automatically: projects in `skipProjects`, projects with no plug-in / workflow classes, and names that look like full trust (API / Portal / web / test / console). Mention them; `-IncludeAll` scans them anyway if the developer insists.
@@ -42,7 +42,7 @@ Read this when Step 0 selects **batch report** or **batch migrate**. The develop
 ### 3.2 Version control (before any edit)
 
 **git**
-- The working tree must be clean. If not → ask the developer to commit or stash first (never do it for them).
+- The working tree must be clean — ignoring the report folder (`docs/sandbox-migration` or `Settings.ReportLocation`) and `sandbox-audit.json`. If not → ask the developer to commit or stash first (never do it for them).
 - Ask (AskUserQuestion), because batch mode commits on its own only with explicit permission:
   - **New branch + one commit per project** (recommended): `git switch -c sandbox/batch-<yyyyMMdd>`, then after each successful project `git add <only that project's changed files>` and `git commit -m "Sandbox migration: <Project>"`
   - **One commit per project on the current branch**

@@ -57,8 +57,9 @@ Rows are **Blocked** unless marked *(Avoid)*. For Dataverse Online, also apply `
 | Blocked API | Replacement |
 |---|---|
 | `HttpContext.Current` | `IPluginExecutionContext` |
-| `HttpUtility.UrlEncode(s)` | `Uri.EscapeDataString(s)` |
-| `HttpUtility.UrlDecode(s)` | `Uri.UnescapeDataString(s)` |
+| `HttpUtility.UrlEncode(s)` | `System.Net.WebUtility.UrlEncode(s)` — same rules (space → `+`). One difference: hex digits are upper case (`%2F`, not `%2f`); if the encoded text is compared, hashed or signed, list it under "Needs verification". **Not** `Uri.EscapeDataString` (space → `%20`) |
+| `HttpUtility.UrlDecode(s)` | `System.Net.WebUtility.UrlDecode(s)` — also turns `+` into a space, like the original. **Not** `Uri.UnescapeDataString` (leaves `+`) |
+| `HttpUtility.UrlPathEncode(s)` | No identical replacement — report under "Needs decision" |
 | `HttpUtility.HtmlEncode(s)` | `System.Net.WebUtility.HtmlEncode(s)` |
 | `HttpUtility.HtmlDecode(s)` | `System.Net.WebUtility.HtmlDecode(s)` |
 | `HttpUtility.ParseQueryString(s)` | `QueryStringHelper.ParseQueryString(s)` — shared helper, see `shared-helpers.md` |

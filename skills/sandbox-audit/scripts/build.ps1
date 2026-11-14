@@ -27,7 +27,8 @@ param(
     [string]$OutFile,
     [switch]$InspectOnly,
     [string]$Dll,
-    [switch]$NoRestore
+    [switch]$NoRestore,
+    [switch]$SkipBuildEvents       # do not run the project's pre- / post-build events (use when they copy or deploy the DLL)
 )
 
 $ErrorActionPreference = 'Stop'
@@ -105,6 +106,24 @@ $isSdk = [bool]$px.DocumentElement.GetAttribute('Sdk')
 $asmName = @($px.SelectNodes("//*[local-name()='AssemblyName']") | Select-Object -First 1 | ForEach-Object { $_.InnerText })
 $asmName = if ($asmName -and $asmName[0]) { $asmName[0] } else { [IO.Path]::GetFileNameWithoutExtension($csproj) }
 
+# solution folder: many projects use $(SolutionDir) in paths and build events; it is empty when a .csproj is built alone
+$solutionDir = $null
+$sd = $projDir
+for ($up = 0; $up -lt 6 -and $sd; $up++) {
+    if (@(Get-ChildItem -LiteralPath $sd -Filter *.sln -File -ErrorAction SilentlyContinue).Count) { $solutionDir = $sd; break }
+    $parent = Split-Path -Parent $sd
+    if (-not $parent -or $parent -eq $sd) { break }
+    $sd = $parent
+}
+$buildEvents = @()
+foreach ($evName in @('PreBuildEvent', 'PostBuildEvent')) {
+    foreach ($ev in $px.SelectNodes("//*[local-name()='$evName']")) { if ($ev.InnerText.Trim()) { $buildEvents += [pscustomobject]@{ Kind = $evName; Command = $ev.InnerText.Trim() } } }
+}
+foreach ($tg in $px.SelectNodes("//*[local-name()='Target']")) {
+    $after = $tg.GetAttribute('AfterTargets') + ' ' + $tg.GetAttribute('BeforeTargets') + ' ' + $tg.GetAttribute('Name')
+    if ($after -match '(?i)\b(AfterBuild|BeforeBuild|Build|PostBuildEvent)\b') { $buildEvents += [pscustomobject]@{ Kind = 'Target ' + $tg.GetAttribute('Name'); Command = (($tg.InnerXml -replace '\s+', ' ').Trim()) } }
+}
+
 # ---------------------------------------------------------------- find a builder
 function Find-Builder {
     $pf86 = ${env:ProgramFiles(x86)}
@@ -133,6 +152,8 @@ if (-not $builder) {
     $errors.Add([pscustomobject]@{ File = $null; Line = $null; Code = 'NEEDS-MSBUILD'; Message = 'This is an old-style (non-SDK) .csproj, which the dotnet CLI cannot build. Install Visual Studio or Build Tools for Visual Studio.' })
 } else {
     $common = @('/nologo', '/v:minimal', "/p:Configuration=$Configuration")
+    if ($solutionDir) { $common += ('/p:SolutionDir=' + $solutionDir.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar) }
+    if ($SkipBuildEvents) { $common += @('/p:PreBuildEvent=', '/p:PostBuildEvent=') }
     if (-not $NoRestore) {
         $restore.Ran = $true
         $rArgs = @($csproj, '/t:Restore') + $common
@@ -141,7 +162,7 @@ if (-not $builder) {
         $restore.Succeeded = ($LASTEXITCODE -eq 0)
         foreach ($l in $out) { $log.Add([string]$l) }
     }
-    if ($builder.Kind -eq 'dotnet') { $out = & $builder.Path build $csproj -c $Configuration --no-restore -nologo -v minimal 2>&1 }
+    if ($builder.Kind -eq 'dotnet') { $dnArgs = @('build', $csproj, '-c', $Configuration, '--no-restore', '-nologo', '-v', 'minimal') + @($common | Where-Object { $_ -like '/p:SolutionDir=*' -or $_ -like '/p:P*BuildEvent=' } | ForEach-Object { '-p:' + $_.Substring(3) }); $out = & $builder.Path @dnArgs 2>&1 }
     else { $out = & $builder.Path @(@($csproj, '/t:Rebuild', '/m') + $common) 2>&1 }
     $exit = $LASTEXITCODE
     $seen = @{}
@@ -179,10 +200,12 @@ if ($success) {
 $result = [pscustomobject]@{
     Mode = 'build'; Project = $csproj; Configuration = $Configuration; ProjectStyle = $(if ($isSdk) { 'sdk' } else { 'legacy' })
     Builder = $builder; Restore = $restore; Success = $success; ExitCode = $exit
+    SolutionDir = $solutionDir; BuildEvents = @($buildEvents); BuildEventsSkipped = [bool]$SkipBuildEvents
     Errors = $errors.ToArray(); ErrorCount = $errors.Count; WarningCount = $warnCount
     Dll = $dllInfo; LogTail = @($log | Select-Object -Last 40); ElapsedSeconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
 }
 Write-Output ("Build: {0} ({1} error(s), {2} warning(s)) using {3}{4}" -f $(if ($success) { 'SUCCEEDED' } else { 'FAILED' }), $errors.Count, $warnCount, $(if ($builder) { "$($builder.Kind) [$($builder.Source)] $($builder.Path)" } else { 'no builder found' }), $(if ($restore.Ran -and -not $restore.Succeeded) { ' - restore reported problems' } else { '' }))
+foreach ($be in $buildEvents) { Write-Output ("  build event{0} [{1}]: {2}" -f $(if ($SkipBuildEvents) { ' (skipped)' } else { ' (ran)' }), $be.Kind, $(if ($be.Command.Length -gt 160) { $be.Command.Substring(0, 160) + '...' } else { $be.Command })) }
 foreach ($e in ($errors | Select-Object -First 30)) { Write-Output ("  {0}{1} {2}" -f $(if ($e.File) { "$($e.File)$(if ($e.Line) { "($($e.Line))" }): " } else { '' }), $e.Code, $e.Message) }
 if ($success -and -not $dllInfo) { Write-Output "  Build succeeded but $asmName.dll was not found under the output folder - inspect it with -InspectOnly -Dll <path>" }
 Write-Result $result

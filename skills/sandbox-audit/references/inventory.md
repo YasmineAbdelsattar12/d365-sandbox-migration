@@ -55,7 +55,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<skill base dir>\scripts\cr
 | **Stored on Disk / GAC** | Must be re-registered in the **Database** — Sandbox and Online accept only Database |
 | **Possibly unused** | No steps (plug-ins) or all steps disabled — ask the team whether it can be retired instead of migrated |
 
-Only custom registrations are read (`customizationlevel = 1`), so Microsoft's own system assemblies are not listed. When the code builds the same assembly name in two projects, the note says so — check which one is deployed.
+The read asks for custom registrations (`customizationlevel = 1`), but assemblies from Microsoft's and vendors' managed solutions still come back. The script and the report keep them apart from the team's own (managed **and** no source in the repository = Microsoft / vendor). When the code builds the same assembly name in two projects, the note says so — check which one is deployed.
 
 ## 4. Tell the developer
 

@@ -93,7 +93,7 @@ Before editing anything, use `VersionControl.Type` from the scan:
 
 **git**
 1. Run `git -C "<project folder>" status --porcelain`.
-2. Check whether any file the migration may touch (the `.csproj`, `packages.config`, files with hits) already has uncommitted changes, and whether other uncommitted changes exist elsewhere in the repo (e.g. from migrating a previous project).
+2. Check whether any file the migration may touch (the `.csproj`, `packages.config`, files with hits) already has uncommitted changes, and whether other uncommitted changes exist elsewhere in the repo (e.g. from migrating a previous project). **Ignore the report folder** (`docs/sandbox-migration` or `Settings.ReportLocation`) and `sandbox-audit.json` — reports written by earlier runs are not code changes.
 3. If there are uncommitted changes, ask with AskUserQuestion: **Commit first** (recommended, so each project's migration is its own reviewable commit) / **New branch** (`git switch -c sandbox/<ProjectName>`, then continue) / **Continue anyway**.
 4. Record for the report: `git -C "<project folder>" rev-parse --short HEAD` (**base commit**, after any commit made in this step) and `git config user.name` (**author**).
 
@@ -141,7 +141,7 @@ A linked file is ONE physical file compiled into every project that links it. `F
 1. **Trace callers inside this assembly** (local files + all linked/shared files in `Files[]`) for the method containing the hit.
 2. **No caller reaches it from a plugin / workflow entry point** → dead code in this assembly. Do NOT edit. Record it in "Blocked APIs left in place" with the evidence (e.g. "`Tools.GetMimeType` — no call sites in the 78 compiled files").
 3. **A live call path exists** → fix it, but only with a change that is behaviour-identical in full trust too (all fixes in the reference files are). Then list **every project in `SharedBy`** under "Projects to rebuild" in the summary.
-4. **Unsure whether a path is live** (e.g. called through reflection, virtual dispatch, or a public API used by many callers) → fix it if `SharedBy` has 1–3 projects; if more, do NOT edit — list it under **"Needs decision"** with the call path you found and the number of affected projects, and let the developer choose.
+4. **Unsure whether a path is live** (e.g. called through reflection, virtual dispatch, or a public API used by many callers) → do NOT edit, whatever the number of projects — list it under **"Needs decision"** with the call path you found and the projects in `SharedBy`, and let the developer choose. A shared file is edited only with a proven live call path, or when the developer says so.
 5. Never edit a shared file just because it contains a blocked API.
 
 ### Caller Verification (local files)
@@ -161,13 +161,14 @@ Applies to individual METHODS, never to whole files.
 
 ### HTTP Hardening
 
-For every outbound call (`Harden` hits), ensure:
-1. `ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;` before the call
-2. Timeout = `Settings.HttpTimeoutSeconds` (default 90; never above 110 — `client.Timeout` / `request.Timeout`)
-3. KeepAlive disabled — `request.KeepAlive = false;` / `client.DefaultRequestHeaders.ConnectionClose = true;` (Microsoft guidance for sandboxed calls)
-4. `.GetAwaiter().GetResult()` instead of `.Result` — except as below
-5. `InvalidPluginExecutionException` instead of generic `Exception` / `InvalidOperationException`
-6. Response body read before the status check
+For every outbound call (`Harden` hits), **apply only**:
+1. Timeout = `Settings.HttpTimeoutSeconds` (default 90; never above 110 — `client.Timeout` / `request.Timeout`) — when the call sets none, or more than 110 s
+2. KeepAlive disabled — `request.KeepAlive = false;` / `client.DefaultRequestHeaders.ConnectionClose = true;` (Microsoft guidance for sandboxed calls)
+3. `.GetAwaiter().GetResult()` instead of `.Result` — except as below
+
+**Never change, only report** (summary → "Left as-is on purpose", each with the suggested improvement):
+- **TLS** — never add, change or remove `ServicePointManager.SecurityProtocol`. An existing line stays exactly as it is; where there is none, add nothing. Mention existing `SecurityProtocol = ...` assignments as a suggestion (the setting is process-wide and `=` switches newer TLS versions off).
+- **Exception types** (`Exception` → `InvalidPluginExecutionException`) and the **order of reading the response** — callers may depend on the current behaviour.
 
 ### `.Result` → `.GetAwaiter().GetResult()` — exception
 
@@ -215,7 +216,8 @@ If packages were removed from `packages.config`, also remove the corresponding `
    ```
    powershell -NoProfile -ExecutionPolicy Bypass -File "<skill base dir>\scripts\build.ps1" -Project "<path to .csproj>" -OutFile "<scratchpad or %TEMP%>\sandbox-build-<Project>.json"
    ```
-   JSON: `Success`, `Builder`, `Errors[]` (`File`, `Line`, `Code`, `Message`), `WarningCount`, `Dll` (`Path`, `Size`, `WithinSizeLimit`, `Version`, `PublicKeyToken`, `Signed`, `References[]`, `RuntimeDependencies[]`), `LogTail`.
+   **Build events first.** Read the `.csproj` for `<PreBuildEvent>`, `<PostBuildEvent>` and custom build targets. If one copies the DLL outside the project, runs ILMerge, or deploys / registers (spkl, pac, PluginRegistration, xcopy to a server share), tell the developer what it does and ask (AskUserQuestion): **Build without the events** (add `-SkipBuildEvents`; recommended when it deploys) / **Build normally**. Harmless or no events → build normally. The script passes `SolutionDir` itself when a `.sln` is found above the project.
+   JSON: `Success`, `Builder`, `SolutionDir`, `BuildEvents[]`, `BuildEventsSkipped`, `Errors[]` (`File`, `Line`, `Code`, `Message`), `WarningCount`, `Dll` (`Path`, `Size`, `WithinSizeLimit`, `Version`, `PublicKeyToken`, `Signed`, `References[]`, `RuntimeDependencies[]`), `LogTail`.
 2. Error `NO-MSBUILD` / `NEEDS-MSBUILD` → tell the developer to install Visual Studio or **Build Tools for Visual Studio** (".NET desktop build tools"), and stop the build step (the code changes stay; say the build was not verified).
 3. If the build **fails**: fix each error —
    - **Missing type/namespace** after removing a reference → a usage was missed; fix the code or restore the reference
