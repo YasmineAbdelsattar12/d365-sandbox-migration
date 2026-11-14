@@ -109,6 +109,9 @@ if ($inv -and -not $Data -and -not $BatchData) {
 $scanJson = $null
 if ($Scan -and (Test-Path -LiteralPath $Scan)) { $scanJson = Get-Content -LiteralPath $Scan -Raw -Encoding UTF8 | ConvertFrom-Json }
 $project = if ($d.Project) { $d.Project } elseif ($scanJson) { $scanJson.Project } else { 'Project' }
+# report-only runs: keep the note out of the title and the file name, show it in the header line instead
+$reportOnly = $false
+if ([string]$project -match '^(.*?)\s*[\(\[-]\s*report[ -]only\b.*$') { $project = $Matches[1].Trim(); $reportOnly = $true; if ($d.Project) { $d.Project = $project } }
 $stamp = Get-Date -Format 'yyyyMMdd-HHmm'
 if (-not (Test-Path -LiteralPath $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
 $OutDir = (Resolve-Path -LiteralPath $OutDir).Path
@@ -219,7 +222,8 @@ function Add-InventorySections($iv, [string]$onlyAssembly, $batch) {
     }
     $all = @(Arr $iv.Assemblies)
     if ($onlyAssembly) {
-        $all = @($all | Where-Object { $_.Name -eq $onlyAssembly })
+        $want = @(($onlyAssembly -replace '\.(dll|exe)$', ''), ([string]$project)) | Where-Object { $_ }
+        $all = @($all | Where-Object { $a = $_; ($want -contains [string]$a.Name) -or @(Arr $a.MatchedProjects | Where-Object { $want -contains (ProjName $_) }).Count })
         if (-not $all.Count) { Add-Section 'Registration in CRM' "<p>Assembly $(Code $onlyAssembly) is <strong>not registered</strong> in $(Code $iv.Url).</p>"; return }
         $rows = foreach ($a in $all) { , @(((Code $a.Name) + "<div class=""muted small"">$(E $a.Version)</div>"), (& $isoBadge $a), (& $srcBadge $a), (E ("{0} / {1}" -f $a.StepsEnabled, ($a.StepsEnabled + $a.StepsDisabled))), (List $a.Notes)) }
         Add-Section 'Registration in CRM' ("<p class=""muted small"">$(E $iv.Url) ($(E $invEnvText)), read $(E (Dt $iv.Generated)).</p>" + (Table @('Assembly', 'Isolation', 'Stored', 'Steps enabled / total', 'Notes') $rows))
@@ -587,7 +591,7 @@ ul.check { list-style: none; padding-left: 1mm; } ul.check li::before { content:
 </style></head>
 <body>
 <div class="cover">
-  <div class="kicker">D365 Sandbox Migration Report$(if ($bd) { ' &middot; Batch' } elseif ($inv -and -not $Data) { ' &middot; CRM Inventory' })</div>
+  <div class="kicker">D365 Sandbox Migration Report$(if ($bd) { ' &middot; Batch' } elseif ($inv -and -not $Data) { ' &middot; CRM Inventory' } elseif ($reportOnly) { ' &middot; Report only - no files were changed' })</div>
   <h1>$(E $project)</h1>
 $(if ($inv -and -not $Data -and -not $bd) { "  <div class=""meta"">$(E $inv.Url) &nbsp;&middot;&nbsp; $(E $invEnvText) &nbsp;&middot;&nbsp; $(E $generated)</div>
   <div class=""verdict"">$(if ($inv.Connected) { "$($invOwn.Count) assemblies of your team &nbsp; $(Badge $(if ($invOwnNone) { 'warn' } else { 'ok' }) "$invOwnNone None") $(Badge 'ok' "$($invOwn.Count - $invOwnNone) Sandbox")$(if ($null -ne $inv.Counts.WithoutSource) { ' ' + (Badge $(if ($invOwnNoSrc) { 'fail' } else { 'ok' }) "$invOwnNoSrc without source") + ' ' + (Badge 'warn' "$($inv.Counts.NotRegistered) not registered") })" } else { Badge 'fail' 'Connection failed' })</div>" } elseif ($bd) { "  <div class=""meta"">$(E $bd.Folder) &nbsp;&middot;&nbsp; $(if ($d.Target) { "Target: $(E $d.Target) &nbsp;&middot;&nbsp; " })$(E $generated)$(if ($d.Author) { " &nbsp;&middot;&nbsp; Prepared by $(E $d.Author)" })</div>
