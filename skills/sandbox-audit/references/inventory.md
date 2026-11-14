@@ -62,7 +62,7 @@ Only custom registrations are read (`customizationlevel = 1`), so Microsoft's ow
 In chat, short:
 
 1. One line: organization, environment, how it connected.
-2. Totals: N custom assemblies — X **None**, Y **Sandbox** · stored Database / Disk / GAC · Z from managed solutions · steps enabled / disabled.
+2. Totals for **the team's own assemblies** (unmanaged, or built from this repository): N — X **None**, Y **Sandbox** · stored Database / Disk / GAC · steps. Then one separate line for **Microsoft / vendor** assemblies (managed, no source here): how many, how many None. Never mix the two: Microsoft's own are replaced by the Online versions, and a vendor's must come from the vendor — they are not migration work for the team and must not be counted as "no source".
 3. If compared with source: with source / **no source** / **not registered** / version and class differences.
 4. A table of the **Isolation None** assemblies (these are the migration work list): assembly, version, source project (or "no source"), steps, notes.
 5. Lists for **Registered, no source** and **Source, not registered**, and anything on Disk / GAC.
@@ -78,7 +78,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<skill base dir>\scripts\ma
 
 ## 5. With batch mode
 
-At the start of **batch report** and **batch migrate** (after the folder is known), ask once: **Start with the CRM inventory?** — **Yes** / **No, only the code**. If yes, run sections 1–2 with `-SolutionRoot "<batch folder>"`, show the totals, and:
+At the start of **batch report** and **batch migrate** (after the folder is known), ask once: **Start with the CRM inventory?** — **Yes** / **No, only the code**. **Always ask** — never add the inventory silently, also when an inventory was already run earlier in the chat (then offer **Yes — reuse the one from <time>** / **Yes — read CRM again** / **No, only the code**).
 
-- pass `-Inventory "<crm-inventory.json>"` to `make-report.ps1` together with `-BatchData` — the CRM sections come first in the combined report;
+If yes, run sections 1–2 with `-SolutionRoot "<repo root>"` (the whole repository, so assemblies from other folders are matched correctly), and:
+
+- in chat, show **only the projects of this batch**: registered or not, None or Sandbox, differences. Do not list assemblies that belong to other folders (for example `Cs` assemblies in a batch on `Plugin`) — say in one line how many more the organization has and that `inventory` mode shows them all;
+- pass `-Inventory "<crm-inventory.json>"` to `make-report.ps1` together with `-BatchData` — the report then starts with one section, **CRM registration of the projects in this batch** (one row per batch project). The full organization lists are only in the inventory report;
 - in batch migrate, show which batch projects are already **Sandbox** in CRM and let the developer leave them out (AskUserQuestion), and mention registered assemblies with no source — they cannot be migrated by this tool.

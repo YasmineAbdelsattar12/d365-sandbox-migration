@@ -315,6 +315,12 @@ $counts = [pscustomobject]@{
     NotRegistered = $notRegistered.Count
     VersionDifferences = @($list | Where-Object { $_.VersionDiff }).Count
     ClassDifferences = @($list | Where-Object { @($_.ClassesNotInCode).Count -or @($_.ClassesNotRegistered).Count }).Count
+    Own = @($list | Where-Object { -not ($_.IsManaged -and $_.Match -eq 'none') }).Count
+    OwnIsolationNone = @($list | Where-Object { -not ($_.IsManaged -and $_.Match -eq 'none') -and $_.IsolationMode -eq 1 }).Count
+    OwnSandbox = @($list | Where-Object { -not ($_.IsManaged -and $_.Match -eq 'none') -and $_.IsolationMode -eq 2 }).Count
+    Vendor = @($list | Where-Object { $_.IsManaged -and $_.Match -eq 'none' }).Count
+    VendorIsolationNone = @($list | Where-Object { $_.IsManaged -and $_.Match -eq 'none' -and $_.IsolationMode -eq 1 }).Count
+    WithoutSourceUnmanaged = $(if ($projects.Count) { @($list | Where-Object { $_.Match -eq 'none' -and -not $_.IsManaged }).Count } else { $null })
     PossiblyUnused = @($list | Where-Object { @($_.Notes) -match 'possibly unused' }).Count
 }
 $result = [pscustomobject]@{
@@ -337,11 +343,12 @@ $c = $counts
 Write-Output ("CRM: {0} ({1}) via {2}" -f $Url, $Environment, $method)
 Write-Output ("Custom plug-in assemblies: {0} - {1} isolation None, {2} Sandbox{3} | stored: {4} Database, {5} Disk/GAC | {6} from managed solutions" -f $c.Assemblies, $c.IsolationNone, $c.Sandbox, $(if ($c.External) { ", $($c.External) External" } else { '' }), $c.Database, $c.DiskOrGac, $c.Managed)
 Write-Output ("Classes: {0} plug-ins, {1} workflow activities | steps: {2} enabled, {3} disabled" -f $c.PluginTypes, $c.WorkflowActivities, $c.StepsEnabled, $c.StepsDisabled)
-if ($projects.Count) { Write-Output ("Source ({0} projects): {1} with source, {2} without source, {3} projects not registered, {4} version differences, {5} class differences" -f $c.SourceProjects, $c.WithSource, $c.WithoutSource, $c.NotRegistered, $c.VersionDifferences, $c.ClassDifferences) }
+Write-Output ("Your team's assemblies: {0} - {1} isolation None, {2} Sandbox | Microsoft / vendor (managed, no source here): {3} - {4} isolation None" -f $c.Own, $c.OwnIsolationNone, $c.OwnSandbox, $c.Vendor, $c.VendorIsolationNone)
+if ($projects.Count) { Write-Output ("Source ({0} projects): {1} with source, {2} of your assemblies without source, {3} projects not registered, {4} version differences, {5} class differences" -f $c.SourceProjects, $c.WithSource, $c.WithoutSourceUnmanaged, $c.NotRegistered, $c.VersionDifferences, $c.ClassDifferences) }
 elseif ($projError) { Write-Output "Source comparison skipped: $projError" }
 else { Write-Output 'Source comparison skipped (pass -SolutionRoot)' }
-Write-Output '--- assemblies ---'
-foreach ($a in $list) {
+Write-Output '--- your assemblies (Microsoft / vendor managed ones are in the JSON only) ---'
+foreach ($a in @($list | Where-Object { -not ($_.IsManaged -and $_.Match -eq 'none') })) {
     Write-Output ("  [{0}] {1} {2} ({3}; {4} plug-ins, {5} activities; steps {6}/{7}){8}" -f $a.Isolation, $a.Name, $a.Version, $a.Source, @($a.PluginTypes).Count, @($a.WorkflowActivities).Count, $a.StepsEnabled, ($a.StepsEnabled + $a.StepsDisabled), $(if ($a.MatchedProjects.Count) { ' -> ' + ($a.MatchedProjects -join ', ') } else { '' }))
     foreach ($n in $a.Notes) { if ($n -notmatch '^Isolation None') { Write-Output "      - $n" } }
 }

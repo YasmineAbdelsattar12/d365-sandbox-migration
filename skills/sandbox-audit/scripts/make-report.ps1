@@ -81,6 +81,12 @@ $bd = $null; $bp = $null; $inv = $null
 if ($Inventory) { $inv = Get-Content -LiteralPath $Inventory -Raw -Encoding UTF8 | ConvertFrom-Json }
 $invHost = $null
 if ($inv) { try { $invHost = (New-Object System.Uri($inv.Url)).Host } catch { $invHost = [string]$inv.Url } }
+$invOwn = @(); $invOwnNone = 0; $invOwnNoSrc = 0
+if ($inv -and $inv.Connected) {
+    $invOwn = @(@($inv.Assemblies) | Where-Object { $_ -and -not ($_.IsManaged -and $_.Match -eq 'none') })
+    $invOwnNone = @($invOwn | Where-Object { [int]$_.IsolationMode -eq 1 }).Count
+    $invOwnNoSrc = @($invOwn | Where-Object { $_.Match -eq 'none' }).Count
+}
 $invEnvText = if ($inv -and $inv.Environment -eq 'online') { 'Dataverse Online' } elseif ($inv) { 'On-premises' } else { $null }
 if ($inv -and -not $Data -and -not $BatchData) {
     $d = [pscustomobject]@{
@@ -201,7 +207,8 @@ function Dt($v) {
     return $t.ToString('dd MMM yyyy, HH:mm', [Globalization.CultureInfo]::InvariantCulture)
 }
 function ProjName([string]$path) { return ([IO.Path]::GetFileNameWithoutExtension(($path -replace '\\', '/'))) }
-function Add-InventorySections($iv, [string]$onlyAssembly) {
+function NormPath([string]$p) { return (($p -replace '\\', '/').TrimEnd('/')).ToLowerInvariant() }
+function Add-InventorySections($iv, [string]$onlyAssembly, $batch) {
     $isoBadge = { param($a) switch ([int]$a.IsolationMode) { 1 { Badge 'warn' 'None' } 2 { Badge 'ok' 'Sandbox' } default { "<span class=""badge info"">$(E $a.Isolation)</span>" } } }
     $srcBadge = { param($a) if ([int]$a.SourceType -in @(1, 2)) { Badge 'fail' $a.Source } else { E $a.Source } }
     if (-not $iv.Connected) {
@@ -215,24 +222,65 @@ function Add-InventorySections($iv, [string]$onlyAssembly) {
         $all = @($all | Where-Object { $_.Name -eq $onlyAssembly })
         if (-not $all.Count) { Add-Section 'Registration in CRM' "<p>Assembly $(Code $onlyAssembly) is <strong>not registered</strong> in $(Code $iv.Url).</p>"; return }
         $rows = foreach ($a in $all) { , @(((Code $a.Name) + "<div class=""muted small"">$(E $a.Version)</div>"), (& $isoBadge $a), (& $srcBadge $a), (E ("{0} / {1}" -f $a.StepsEnabled, ($a.StepsEnabled + $a.StepsDisabled))), (List $a.Notes)) }
-        Add-Section 'Registration in CRM' ("<p class=""muted small"">$(E $iv.Url) ($(E $invEnvText)), read $(E (Dt $iv.Generated)).</p>" + '<div class="inv">' + (Table @('Assembly', 'Isolation', 'Stored', 'Steps enabled / total', 'Notes') $rows) + '</div>')
+        Add-Section 'Registration in CRM' ("<p class=""muted small"">$(E $iv.Url) ($(E $invEnvText)), read $(E (Dt $iv.Generated)).</p>" + (Table @('Assembly', 'Isolation', 'Stored', 'Steps enabled / total', 'Notes') $rows))
         return
     }
+    $hasSrc = $null -ne $iv.Counts.WithoutSource
+    $steps = { param($a) E ("{0} / {1}" -f $a.StepsEnabled, ($a.StepsEnabled + $a.StepsDisabled)) }
+    $noteList = { param($a) $n = @(Arr $a.Notes | Where-Object { $_ -notmatch '^Isolation None|^Stored on|^No source|^Matched by class names' }); if ($a.Match -like 'class names*') { $n = @('Assembly name differs from the project - matched by class names') + $n }; if ($n.Count) { List $n } else { '' } }
+    $flags = { param($a) $f = @(); if ($a.VersionDiff -or (Has $a.ClassesNotInCode) -or (Has $a.ClassesNotRegistered) -or $a.Match -like 'class names*') { $f += 'differs from the code - see Differences' }
+        foreach ($n in (Arr $a.Notes)) { if ($n -match 'possibly unused') { $f += 'possibly unused' } elseif ($n -match 'projects build an assembly') { $f += [string]$n } }
+        if ($f.Count) { '<div class="muted small">' + (($f | ForEach-Object { E $_ }) -join '<br>') + '</div>' } else { '' } }
+    # "yours" = unmanaged, or managed but built from this repository; "vendor" = managed and no source here
+    $vendor = @($all | Where-Object { $_.IsManaged -and $_.Match -eq 'none' })
+    $own = @($all | Where-Object { -not ($_.IsManaged -and $_.Match -eq 'none') })
+    $ownNone = @($own | Where-Object { [int]$_.IsolationMode -eq 1 }).Count
+    $ownSandbox = @($own | Where-Object { [int]$_.IsolationMode -eq 2 }).Count
+    $ownNoSrc = @($own | Where-Object { $_.Match -eq 'none' })
+    $orgLine = "<strong>$($own.Count)</strong> of your team &nbsp; " + (Badge $(if ($ownNone) { 'warn' } else { 'ok' }) "$ownNone None") + ' ' + (Badge 'ok' "$ownSandbox Sandbox")
+
+    # ---------------- inside a batch report: only the projects of this batch
+    if ($batch) {
+        $byProj = @{}
+        foreach ($a in $all) { foreach ($mp in (Arr $a.MatchedProjects)) { $byProj[(NormPath (Join-Path ([string]$iv.SolutionRoot) ([string]$mp)))] = $a } }
+        $byAsm = @{}; foreach ($a in $all) { $byAsm[([string]$a.Name).ToLowerInvariant()] = $a }
+        $bprojects = @(Arr $batch.Projects | Where-Object { $_.Status -eq 'scanned' } | Sort-Object Name)
+        $reg = 0; $regNone = 0; $notReg = 0
+        $rows = foreach ($p in $bprojects) {
+            $a = $byProj[(NormPath ([string]$p.Path))]
+            if (-not $a) { $a = $byAsm[([string]$p.Name).ToLowerInvariant()] }
+            if ($a) {
+                $reg++; if ([int]$a.IsolationMode -eq 1) { $regNone++ }
+                , @((Code $p.Name), ((Code $a.Name) + "<div class=""muted small"">$(E $a.Version)</div>"), (& $isoBadge $a), (& $srcBadge $a), (& $steps $a), (& $noteList $a))
+            } else {
+                $notReg++
+                , @((Code $p.Name), (Badge 'warn' 'Not registered'), '', '', '', '<span class="muted small">No registered assembly matches this project (by assembly name or class names)</span>')
+            }
+        }
+        $b = "<p>$(Code $iv.Url) ($(E $invEnvText)), read $(E (Dt $iv.Generated)) - read-only.</p>"
+        $b += "<p><strong>$reg</strong> of the $($bprojects.Count) projects in this batch are registered &nbsp; " + (Badge $(if ($regNone) { 'warn' } else { 'ok' }) "$regNone None") + ' ' + (Badge 'ok' "$($reg - $regNone) Sandbox") + $(if ($notReg) { ' ' + (Badge 'warn' "$notReg not registered") } else { '' }) + '</p>'
+        $b += '<div class="inv3">' + (Table @('Project', 'Registered as', 'Isolation', 'Stored', 'Steps', 'Notes') $rows) + '</div>'
+        $b += "<p class=""muted small"">Only the projects of this batch are shown. The whole organization has $($all.Count) custom assemblies ($($own.Count) of your team: $ownNone None, $ownSandbox Sandbox; $($vendor.Count) from Microsoft or vendor managed solutions) - run the <strong>inventory</strong> mode for the full list. Steps = enabled / total.</p>"
+        Add-Section 'CRM registration of the projects in this batch' $b
+        return
+    }
+
+    # ---------------- full inventory report
     $c = $iv.Counts
-    $hasSrc = $null -ne $c.WithoutSource
     $kv = New-Object System.Collections.Generic.List[object]
     $kv.Add(@('Organization', (Code $iv.Url)))
     $kv.Add(@('Environment', (E $invEnvText)))
     $kv.Add(@('Read', (E ("{0} via {1} - read-only" -f (Dt $iv.Generated), $iv.Method))))
-    $kv.Add(@('Custom plug-in assemblies', ("<strong>$(E $c.Assemblies)</strong> &nbsp; " + (Badge 'warn' "$($c.IsolationNone) None") + ' ' + (Badge 'ok' "$($c.Sandbox) Sandbox") + $(if ($c.External) { " <span class=""badge info"">$($c.External) External</span>" } else { '' }))))
-    $kv.Add(@('Stored', ((E "$($c.Database) in the Database") + $(if ($c.DiskOrGac) { ' ' + (Badge 'fail' "$($c.DiskOrGac) on Disk / GAC") } else { '' }))))
-    if ($c.Managed) { $kv.Add(@('From managed solutions', (E "$($c.Managed) (Microsoft, ISV or another team - not migrated by this tool)"))) }
-    $kv.Add(@('Classes', (E ("{0} plug-ins, {1} workflow activities" -f $c.PluginTypes, $c.WorkflowActivities))))
-    $kv.Add(@('Steps', (E ("{0} enabled, {1} disabled" -f $c.StepsEnabled, $c.StepsDisabled))))
+    $kv.Add(@('Custom plug-in assemblies', "<strong>$(E $all.Count)</strong> registered"))
+    $kv.Add(@('Your assemblies', $orgLine))
+    $kv.Add(@('Microsoft / vendor (managed)', ((E "$($vendor.Count)") + ' <span class="muted">- not your code, not migrated by this tool (listed last)</span>')))
+    $dg = @($own | Where-Object { [int]$_.SourceType -in @(1, 2) }).Count
+    $kv.Add(@('Stored', ((E "$($own.Count - $dg) in the Database") + $(if ($dg) { ' ' + (Badge 'fail' "$dg on Disk / GAC") } else { '' }))))
+    $kv.Add(@('Steps', (E ("{0} enabled, {1} disabled" -f ($own | Measure-Object StepsEnabled -Sum).Sum, ($own | Measure-Object StepsDisabled -Sum).Sum))))
     if ($hasSrc) {
         $kv.Add(@('Compared with source', (E ("{0} projects in {1}" -f $c.SourceProjects, $iv.SolutionRoot))))
-        $kv.Add(@('Registered, with source', (Badge 'ok' "$($c.WithSource)")))
-        $kv.Add(@('Registered, no source in repo', $(if ($c.WithoutSource) { Badge 'fail' "$($c.WithoutSource)" } else { Badge 'ok' '0' })))
+        $kv.Add(@('Registered, with source', (Badge 'ok' "$(@($own | Where-Object { $_.Match -ne 'none' }).Count)")))
+        $kv.Add(@('Registered, no source in repo', $(if ($ownNoSrc.Count) { Badge 'fail' "$($ownNoSrc.Count)" } else { Badge 'ok' '0' })))
         $kv.Add(@('Source, not registered', $(if ($c.NotRegistered) { Badge 'warn' "$($c.NotRegistered)" } else { Badge 'ok' '0' })))
         $kv.Add(@('Version / class differences', (E ("{0} / {1}" -f $c.VersionDifferences, $c.ClassDifferences))))
     } else { $kv.Add(@('Compared with source', '<span class="muted">Not compared (no repository folder given)</span>')) }
@@ -240,25 +288,23 @@ function Add-InventorySections($iv, [string]$onlyAssembly) {
     $b += '<p class="muted small">Read directly from the organization (plug-in assemblies, plug-in types and steps) - nothing was changed there. Isolation None assemblies must move to Sandbox before Dataverse Online; Disk / GAC assemblies must be registered in the Database.</p>'
     Add-Section 'CRM registrations - overview' $b
 
-    $rows = foreach ($a in $all) {
+    $rows = foreach ($a in $own) {
         $srcCell = if (Has $a.MatchedProjects) { ((Arr $a.MatchedProjects) | ForEach-Object { Code (ProjName $_) }) -join '<br>' } elseif ($hasSrc) { Badge 'fail' 'No source' } else { '<span class="muted">-</span>' }
-        $notes = @(Arr $a.Notes | Where-Object { $_ -notmatch '^Isolation None|^Stored on|^No source' })
         , @(((Code $a.Name) + "<div class=""muted small"">$(E $a.Version)$(if ($a.IsManaged) { ' &middot; managed' })</div>"), (& $isoBadge $a), (& $srcBadge $a),
-            (E ("{0} / {1}" -f @(Arr $a.PluginTypes).Count, @(Arr $a.WorkflowActivities).Count)), (E ("{0} / {1}" -f $a.StepsEnabled, ($a.StepsEnabled + $a.StepsDisabled))), $srcCell, $(if ($notes.Count) { List $notes } else { '' }))
+            (E ("{0} / {1}" -f @(Arr $a.PluginTypes).Count, @(Arr $a.WorkflowActivities).Count)), (& $steps $a), ($srcCell + (& $flags $a)))
     }
-    Add-Section 'Registered assemblies' ('<p class="muted small">Isolation None first. Classes = plug-ins / workflow activities; steps = enabled / total.</p><div class="inv">' + (Table @('Assembly', 'Isolation', 'Stored', 'Classes', 'Steps', 'Source project', 'Notes') $rows) + '</div>')
+    Add-Section 'Your registered assemblies' ('<p class="muted small">Isolation None first. Classes = plug-ins / workflow activities; steps = enabled / total.</p><div class="inv">' + (Table @('Assembly', 'Isolation', 'Stored', 'Classes', 'Steps', 'Source project') $rows) + '</div>')
 
     if ($hasSrc) {
-        $ns = @($all | Where-Object { $_.Match -eq 'none' })
-        if ($ns.Count) {
-            $rows = foreach ($a in $ns) { , @((Code $a.Name), (E $a.Version), (& $isoBadge $a), (E $(if ($a.IsManaged) { 'Managed solution - Microsoft, ISV or another team' } else { 'Unmanaged - source may be in another repository, branch or lost' })), (E (Dt $a.ModifiedOn))) }
-            Add-Section 'Registered, but no source code in this repository' ('<p class="muted small">Find the source (another repository or branch, a vendor, a decompiled copy) or confirm the assembly is no longer needed before go-live.</p>' + (Table @('Assembly', 'Version', 'Isolation', 'Likely origin', 'Last modified') $rows))
+        if ($ownNoSrc.Count) {
+            $rows = foreach ($a in $ownNoSrc) { , @((Code $a.Name), (E $a.Version), (& $isoBadge $a), (& $steps $a), (E (Dt $a.ModifiedOn))) }
+            Add-Section 'Registered, but no source code in this repository' ('<p class="muted small">Unmanaged assemblies that no project matches - the source may be in another repository or branch, or lost. Find it, or confirm the assembly is no longer needed, before go-live.</p>' + (Table @('Assembly', 'Version', 'Isolation', 'Steps', 'Last modified') $rows))
         }
         if (Has $iv.NotRegistered) {
-            $rows = foreach ($p in (Arr $iv.NotRegistered)) { , @((Code $p.Path), (E $p.Kind), (Code $p.AssemblyName), (E ((Arr $p.EntryTypes) -join ', '))) }
-            Add-Section 'Source code, but not registered in this organization' ('<p class="muted small">Projects with plug-in or workflow activity classes that no registered assembly matches (by assembly name or class names). New work, retired code, or registered in another organization.</p>' + (Table @('Project', 'Kind', 'Assembly name', 'Classes') $rows))
+            $rows = foreach ($p in (Arr $iv.NotRegistered)) { , @(((Code (ProjName $p.Path)) + "<div class=""muted small"">$(E (Split-Path -Parent (([string]$p.Path) -replace '\\', '/')))</div>"), (E $p.Kind), (E ((Arr $p.EntryTypes) -join ', '))) }
+            Add-Section 'Source code, but not registered in this organization' ('<p class="muted small">Projects with plug-in or workflow activity classes that no registered assembly matches (by assembly name or class names). New work, retired code, or registered in another organization.</p><div class="inv2">' + (Table @('Project', 'Kind', 'Classes') $rows) + '</div>')
         }
-        $df = @($all | Where-Object { $_.VersionDiff -or (Has $_.ClassesNotInCode) -or (Has $_.ClassesNotRegistered) -or $_.Match -like 'class names*' })
+        $df = @($own | Where-Object { $_.VersionDiff -or (Has $_.ClassesNotInCode) -or (Has $_.ClassesNotRegistered) -or $_.Match -like 'class names*' })
         if ($df.Count) {
             $rows = foreach ($a in $df) {
                 $items = @()
@@ -271,9 +317,14 @@ function Add-InventorySections($iv, [string]$onlyAssembly) {
             Add-Section 'Differences between CRM and code' ('<div class="inv2">' + (Table @('Assembly', 'Project', 'Difference') $rows) + '</div>')
         }
     }
+    if ($vendor.Count) {
+        $vNone = @($vendor | Where-Object { [int]$_.IsolationMode -eq 1 }).Count
+        $rows = foreach ($a in $vendor) { , @((Code $a.Name), (E $a.Version), (& $isoBadge $a), (& $steps $a)) }
+        Add-Section 'Microsoft and vendor assemblies (managed solutions)' ("<p class=""muted small"">$($vendor.Count) assemblies that came with managed solutions and have no source here ($vNone Isolation None). They are not your code: Microsoft's own are replaced by the Dataverse Online versions; for a vendor (ISV) solution, ask the vendor for an Online-ready version.</p>" + (Table @('Assembly', 'Version', 'Isolation', 'Steps') $rows))
+    }
 }
 
-if ($inv -and -not $Data) { Add-InventorySections $inv '' }
+if ($inv -and -not $Data) { Add-InventorySections $inv '' $bd }
 
 if ($bd) {
     # ================================================================ batch report
@@ -388,7 +439,7 @@ if ($scanJson) {
     $sumHtml += "<p class=""muted small"">Scanner: $($c.Hits) pattern hits in $($c.FilesWithHits) files - Blocked $($c.Blocked), Avoid $($c.Avoid), Review $($c.Review), HTTP $($c.Harden).</p>"
 }
 Add-Section 'Summary' $sumHtml
-if ($inv) { Add-InventorySections $inv ([string]$d.Assembly) }
+if ($inv) { Add-InventorySections $inv ([string]$d.Assembly) $null }
 
 # 2. Changes made
 if (Has $d.Changes) {
@@ -527,7 +578,11 @@ pre span { display: block; } pre .a { background: #e6ffed; color: #0e5c2f; } pre
 pre.stat { background: #f8fafc; border: 1px solid #d9e2ec; border-radius: 1.5mm; margin-bottom: 3mm; }
 ul.check { list-style: none; padding-left: 1mm; } ul.check li::before { content: "\2610  "; color: #52606d; }
 .owner { color: #1d4e89; }
-.inv td:nth-child(1) { width: 25%; } .inv td:nth-child(6) { width: 18%; } .inv td code, .inv2 td code { overflow-wrap: break-word; word-break: normal; } .inv2 td:nth-child(1) { width: 25%; } .inv2 td:nth-child(2) { width: 20%; }
+.inv table, .inv2 table, .inv3 table { table-layout: fixed; }
+.inv td code, .inv2 td code, .inv3 td code, .inv td li, .inv2 td li, .inv3 td li { overflow-wrap: anywhere; }
+.inv th:nth-child(1) { width: 34%; } .inv th:nth-child(2) { width: 11%; } .inv th:nth-child(3) { width: 11%; } .inv th:nth-child(4) { width: 8%; } .inv th:nth-child(5) { width: 8%; }
+.inv2 th:nth-child(1) { width: 27%; } .inv2 th:nth-child(2) { width: 23%; }
+.inv3 th:nth-child(1) { width: 22%; } .inv3 th:nth-child(2) { width: 22%; } .inv3 th:nth-child(3) { width: 10%; } .inv3 th:nth-child(4) { width: 10%; } .inv3 th:nth-child(5) { width: 7%; }
 .footer { margin-top: 10mm; padding-top: 2mm; border-top: 1px solid #d9e2ec; color: #7b8794; font-size: 8.5pt; }
 </style></head>
 <body>
@@ -535,7 +590,7 @@ ul.check { list-style: none; padding-left: 1mm; } ul.check li::before { content:
   <div class="kicker">D365 Sandbox Migration Report$(if ($bd) { ' &middot; Batch' } elseif ($inv -and -not $Data) { ' &middot; CRM Inventory' })</div>
   <h1>$(E $project)</h1>
 $(if ($inv -and -not $Data -and -not $bd) { "  <div class=""meta"">$(E $inv.Url) &nbsp;&middot;&nbsp; $(E $invEnvText) &nbsp;&middot;&nbsp; $(E $generated)</div>
-  <div class=""verdict"">$(if ($inv.Connected) { "$(E $inv.Counts.Assemblies) custom assemblies &nbsp; $(Badge 'warn' "$($inv.Counts.IsolationNone) None") $(Badge 'ok' "$($inv.Counts.Sandbox) Sandbox")$(if ($null -ne $inv.Counts.WithoutSource) { ' ' + (Badge 'fail' "$($inv.Counts.WithoutSource) without source") + ' ' + (Badge 'warn' "$($inv.Counts.NotRegistered) not registered") })" } else { Badge 'fail' 'Connection failed' })</div>" } elseif ($bd) { "  <div class=""meta"">$(E $bd.Folder) &nbsp;&middot;&nbsp; $(if ($d.Target) { "Target: $(E $d.Target) &nbsp;&middot;&nbsp; " })$(E $generated)$(if ($d.Author) { " &nbsp;&middot;&nbsp; Prepared by $(E $d.Author)" })</div>
+  <div class=""verdict"">$(if ($inv.Connected) { "$($invOwn.Count) assemblies of your team &nbsp; $(Badge $(if ($invOwnNone) { 'warn' } else { 'ok' }) "$invOwnNone None") $(Badge 'ok' "$($invOwn.Count - $invOwnNone) Sandbox")$(if ($null -ne $inv.Counts.WithoutSource) { ' ' + (Badge $(if ($invOwnNoSrc) { 'fail' } else { 'ok' }) "$invOwnNoSrc without source") + ' ' + (Badge 'warn' "$($inv.Counts.NotRegistered) not registered") })" } else { Badge 'fail' 'Connection failed' })</div>" } elseif ($bd) { "  <div class=""meta"">$(E $bd.Folder) &nbsp;&middot;&nbsp; $(if ($d.Target) { "Target: $(E $d.Target) &nbsp;&middot;&nbsp; " })$(E $generated)$(if ($d.Author) { " &nbsp;&middot;&nbsp; Prepared by $(E $d.Author)" })</div>
   <div class=""verdict"">$(E $bd.Counts.InBatch) projects in this batch &nbsp; $(Badge 'ok' "$($bd.Counts.OnlineOk) ready") $(Badge 'warn' "$($bd.Counts.OnlineWarn) needs work") $(Badge 'fail' "$($bd.Counts.OnlineFail) blocked")</div>" } else { "  <div class=""meta"">Assembly $(E $d.Assembly) &nbsp;&middot;&nbsp; Target: $(E $d.Target) &nbsp;&middot;&nbsp; $(E $generated)$(if ($d.Author) { " &nbsp;&middot;&nbsp; Prepared by $(E $d.Author)" })</div>
   <div class=""verdict"">Build $(Badge $s.BuildResult $s.BuildResult) &nbsp; Online readiness $(Badge $s.OnlineVerdict $s.OnlineVerdictText)</div>" })
 </div>
