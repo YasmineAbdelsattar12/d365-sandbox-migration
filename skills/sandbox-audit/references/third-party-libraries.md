@@ -37,6 +37,7 @@ Two separate questions for every library:
 | **log4net / NLog / Serilog** | Blocked | Files / event log | `ITracingService` (`blocked-apis.md`) |
 | **Dapper / Entity Framework** | Blocked | Direct SQL | `IOrganizationService` |
 | **Newtonsoft.Json** | Handled | — | `serializer-rules.md` |
+| **WPF / Windows Forms references** (`PresentationFramework`, `PresentationCore`, `WindowsBase`) | OK | Usually a leftover from the workflow project template; any code that uses them is reported as a Blocked hit | Optionally remove the unused reference |
 | **RestSharp, HtmlAgilityPack, CsvHelper, Polly** | OK | Managed code; HTTP calls get the usual hardening | Packaging only — or replace with built-in .NET code |
 | **Azure SDKs** (Storage, Service Bus, Event Hubs) | Review | HTTP-based, large dependency trees | Prefer a registered service endpoint (`IServiceEndpointNotificationService`) for Service Bus / Event Hubs |
 
