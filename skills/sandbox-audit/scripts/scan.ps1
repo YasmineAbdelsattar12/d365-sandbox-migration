@@ -380,7 +380,7 @@ $patterns = @(
     @('Network',    'Avoid',   'Non-80/443 port in URL', '(?i)https?://[^/"\s:]+:(?!80\b|443\b)\d+'),
     @('Network',    'Blocked', 'IP-address URL',      '(?i)https?://(\d{1,3}(\.\d{1,3}){3}|\[[0-9a-f:]+\])'),
     @('Auth',       'Blocked', 'Windows credentials', '(\bUseDefaultCredentials\s*=\s*true|\bCredentialCache\.Default(Network)?Credentials\b)'),
-    @('Auth',       'Review',  'NetworkCredential',   '\bnew\s+NetworkCredential\s*\('),
+    @('Auth',       'Review',  'NetworkCredential',   '\bnew\s+(System\.Net\.)?NetworkCredential\s*\('),
     # HTTP hardening targets
     @('HTTP',       'Harden',  'HttpClient',          '\bnew\s+HttpClient\s*\('),
     @('HTTP',       'Harden',  'WebRequest',          '\b(Http)?WebRequest\.Create(Http)?\s*\('),
@@ -419,6 +419,14 @@ $patterns = @(
     # Misc assemblies
     @('Misc',       'Blocked', 'LDAP / DirectoryServices', '\b(DirectoryEntry|DirectorySearcher|PrincipalContext)\b'),
     @('Misc',       'Blocked', 'WCF non-HTTP binding', '\b(NetTcpBinding|NetNamedPipeBinding)\b'),
+    # Third-party library features that use blocked APIs inside the library (see references/third-party-libraries.md)
+    @('ThirdParty', 'Blocked', 'QRCoder image class (System.Drawing)', '(\b(Base64QRCode|ArtQRCode)\b|\bnew\s+(QRCoder\.)?QRCode\s*\()'),
+    @('ThirdParty', 'Blocked', 'ZXing bitmap writer (System.Drawing)', '(\bnew\s+(ZXing\.)?BarcodeWriter\s*(\(|<\s*(System\.Drawing\.)?Bitmap\b)|\bBarcodeWriter<\s*(System\.Drawing\.)?Bitmap\b)'),
+    @('ThirdParty', 'Review',  'Auto-fit columns (System.Drawing text measuring)', '\.(AutoFitColumns|AdjustToContents)\s*\('),
+    @('ThirdParty', 'Blocked', 'Fonts loaded from disk', '\bFontFactory\.Register(Directories|Directory)?\s*\('),
+    # Report rendering
+    @('Reporting',  'Blocked', 'ReportViewer local report', '\b(LocalReport|ReportViewer)\b'),
+    @('Reporting',  'Review',  'SSRS Report Server web service', '\b(ReportExecutionService|ReportExecution2005|ReportingService2010|ReportService2010)\b'),
     @('Misc',       'Blocked', 'Blocked namespace',   '\b(Microsoft\.VisualBasic|System\.Windows\.Forms|System\.Management|System\.ServiceProcess|System\.Printing|System\.Speech|System\.Drawing|System\.Windows\.Media)\b')
 )
 $compiled = foreach ($p in $patterns) {
@@ -991,8 +999,10 @@ foreach ($en in $entries) { if ($en.Kind -eq 'Plugin') { $plugins.Add($en.FullNa
 $assumedEntries = @($entries | Where-Object { $_.AssumedFromBase } | ForEach-Object { [pscustomobject]@{ Class = $_.FullName; Kind = $_.Kind; Base = $_.AssumedFromBase; Note = 'base class is not in the source (referenced DLL) - confirm it is a plug-in / workflow activity base' } })
 
 # dependency candidates (confirm against the compiled DLL after the build)
-$fwRefRx = '^(mscorlib|netstandard|System(\..+)?|Microsoft\.CSharp|Microsoft\.Xrm\.Sdk(\..+)?|Microsoft\.Crm\.Sdk\.Proxy|Microsoft\.IdentityModel|WindowsBase|Microsoft\.VisualBasic)$'
+$fwRefRx = '^(mscorlib|netstandard|System(\..+)?|Microsoft\.CSharp|Microsoft\.Xrm\.Sdk(\..+)?|Microsoft\.Crm\.Sdk\.Proxy|Microsoft\.IdentityModel|WindowsBase|PresentationCore|PresentationFramework(\..+)?|ReachFramework|UIAutomation\w*|Microsoft\.VisualBasic)$'
 $fwPkgRx = '^(Microsoft\.CrmSdk\..+|Microsoft\.IdentityModel|System\..+|Microsoft\.NETFramework\.ReferenceAssemblies.*|Microsoft\.PowerApps\.MSBuild\..+)$'
+# build-time tools - not runtime dependencies (merge tools are reported separately below)
+$toolPkgRx = '^(ILMerge|ILMerge\.Tools|MSBuild\.ILMerge\.Task|ILMerge\.MSBuild\.Task|ILRepack|ILRepack\.Lib\.MSBuild\.Task|ILRepack\.MSBuild\.Task|Costura\.Fody|Fody|Microsoft\.Net\.Compilers.*|Microsoft\.CodeDom\.Providers\..+|StyleCop\..+|.+\.Analyzers)$'
 $deps = New-Object System.Collections.Generic.List[object]
 foreach ($r in (Get-XmlNodes $projXml 'Reference')) {
     $nm = ($r.GetAttribute('Include') -split ',')[0].Trim()
@@ -1001,14 +1011,135 @@ foreach ($r in (Get-XmlNodes $projXml 'Reference')) {
     $deps.Add([pscustomobject]@{ Name = $nm; Kind = 'Reference'; Detail = $hp })
 }
 foreach ($pr in (Get-XmlNodes $projXml 'PackageReference')) {
-    $nm = $pr.GetAttribute('Include'); if ($nm -match $fwPkgRx) { continue }
+    $nm = $pr.GetAttribute('Include'); if ($nm -match $fwPkgRx -or $nm -match $toolPkgRx) { continue }
     $deps.Add([pscustomobject]@{ Name = $nm; Kind = 'PackageReference'; Detail = $pr.GetAttribute('Version') })
 }
 foreach ($pk in $packages) {
-    $nm = ($pk -split ' ')[0]; if ($nm -match $fwPkgRx -or ($deps | Where-Object { $_.Name -eq $nm })) { continue }
+    $nm = ($pk -split ' ')[0]; if ($nm -match $fwPkgRx -or $nm -match $toolPkgRx -or ($deps | Where-Object { $_.Name -eq $nm })) { continue }
     $deps.Add([pscustomobject]@{ Name = $nm; Kind = 'packages.config'; Detail = ($pk -split ' ')[1] })
 }
 foreach ($pj in $projRefs) { $deps.Add([pscustomobject]@{ Name = [IO.Path]::GetFileNameWithoutExtension(($pj -replace '[\\/]', $sep)); Kind = 'ProjectReference'; Detail = $pj }) }
+
+# ---- merge tools (ILMerge / ILRepack / Costura): the merged libraries are runtime dependencies even though the built DLL hides them
+$mergeEvidence = New-Object System.Collections.Generic.List[string]
+$mergeTool = $null
+$allPkgIds = @(@($packages | ForEach-Object { ($_ -split ' ')[0] }) + @(Get-XmlNodes $projXml 'PackageReference' | ForEach-Object { $_.GetAttribute('Include') }))
+foreach ($id in $allPkgIds) {
+    if ($id -match '^(ILMerge|MSBuild\.ILMerge\.Task|ILMerge\.MSBuild\.Task|ILMerge\.Tools)$') { $mergeTool = 'ILMerge'; $mergeEvidence.Add("package $id") }
+    elseif ($id -match '^ILRepack') { $mergeTool = 'ILRepack'; $mergeEvidence.Add("package $id") }
+    elseif ($id -eq 'Costura.Fody') { $mergeTool = 'Costura'; $mergeEvidence.Add("package $id") }
+}
+foreach ($imp in (Get-XmlNodes $projXml 'Import')) {
+    $ip = $imp.GetAttribute('Project')
+    if ($ip -match '(?i)ILMerge') { if (-not $mergeTool) { $mergeTool = 'ILMerge' }; $mergeEvidence.Add("import $ip") }
+    elseif ($ip -match '(?i)ILRepack') { if (-not $mergeTool) { $mergeTool = 'ILRepack' }; $mergeEvidence.Add("import $ip") }
+    elseif ($ip -match '(?i)Costura|Fody') { if (-not $mergeTool) { $mergeTool = 'Costura' }; $mergeEvidence.Add("import $ip") }
+}
+foreach ($evName in @('PostBuildEvent', 'PreBuildEvent')) {
+    foreach ($ev in (Get-XmlNodes $projXml $evName)) {
+        if ($ev.InnerText -match '(?i)\bilmerge') { if (-not $mergeTool) { $mergeTool = 'ILMerge' }; $mergeEvidence.Add("$evName runs ILMerge") }
+        elseif ($ev.InnerText -match '(?i)\bilrepack') { if (-not $mergeTool) { $mergeTool = 'ILRepack' }; $mergeEvidence.Add("$evName runs ILRepack") }
+    }
+}
+foreach ($ex in (Get-XmlNodes $projXml 'Exec')) {
+    $cmd = $ex.GetAttribute('Command')
+    if ($cmd -match '(?i)\bilmerge') { if (-not $mergeTool) { $mergeTool = 'ILMerge' }; $mergeEvidence.Add('build target runs ILMerge') }
+    elseif ($cmd -match '(?i)\bilrepack') { if (-not $mergeTool) { $mergeTool = 'ILRepack' }; $mergeEvidence.Add('build target runs ILRepack') }
+}
+foreach ($mf in @('ILMergeConfig.json', 'ILMerge.props', 'ILMergeOrder.txt', 'ILRepack.targets', 'FodyWeavers.xml')) {
+    if (Test-Path -LiteralPath (Join-Path $projDir $mf)) {
+        $t = if ($mf -like 'ILRepack*') { 'ILRepack' } elseif ($mf -like 'Fody*') { 'Costura' } else { 'ILMerge' }
+        if ($mf -ne 'FodyWeavers.xml' -or ((Get-Content -LiteralPath (Join-Path $projDir $mf) -Raw) -match '(?i)Costura')) {
+            if (-not $mergeTool) { $mergeTool = $t }; $mergeEvidence.Add("file $mf")
+        }
+    }
+}
+$merge = $null
+if ($mergeTool) {
+    $mergedLibs = New-Object System.Collections.Generic.List[string]; $mergedFrom = $null
+    $cfgJson = Join-Path $projDir 'ILMergeConfig.json'
+    if (Test-Path -LiteralPath $cfgJson) {
+        try {
+            $mc = Get-Content -LiteralPath $cfgJson -Raw | ConvertFrom-Json
+            $inputs = @(); if ($mc.General -and $mc.General.InputAssemblies) { $inputs = @($mc.General.InputAssemblies) } elseif ($mc.InputAssemblies) { $inputs = @($mc.InputAssemblies) }
+            foreach ($i in $inputs) { $mergedLibs.Add(([IO.Path]::GetFileName([string]$i)) -replace '(?i)\.dll$', '') }
+            if ($mergedLibs.Count) { $mergedFrom = 'ILMergeConfig.json (InputAssemblies)' }
+        } catch { }
+    }
+    $fody = Join-Path $projDir 'FodyWeavers.xml'
+    if (-not $mergedLibs.Count -and $mergeTool -eq 'Costura' -and (Test-Path -LiteralPath $fody)) {
+        $fm = [regex]::Match((Get-Content -LiteralPath $fody -Raw), '(?i)IncludeAssemblies\s*=\s*"([^"]+)"')
+        if ($fm.Success) { foreach ($i in ($fm.Groups[1].Value -split '[|\r\n]')) { if ($i.Trim()) { $mergedLibs.Add($i.Trim()) } }; $mergedFrom = 'FodyWeavers.xml (IncludeAssemblies)' }
+    }
+    if (-not $mergedLibs.Count) {
+        foreach ($d in $deps) { $mergedLibs.Add($d.Name) }
+        $mergedFrom = 'all referenced libraries (the tool merges copy-local references by default)'
+    }
+    $merge = [pscustomobject]@{
+        Tool = $mergeTool; Evidence = @($mergeEvidence | Select-Object -Unique); MergedLibraries = @($mergedLibs | Select-Object -Unique); MergedFrom = $mergedFrom
+        Note = "The built DLL contains these libraries, so it shows no runtime dependencies - treat them as real dependencies. $mergeTool is not supported by Microsoft for plug-ins: on-premises Sandbox it is the usual workaround; for Dataverse Online use a plug-in package (plug-ins only) or replace / include the library code. Merging does not make a library Sandbox-safe."
+    }
+}
+
+# ---- known third-party libraries (status inside Sandbox) - references/third-party-libraries.md has the details
+$knownLibs = @(
+    @{ Rx = '^QRCoder$'; Name = 'QRCoder'; Status = 'Review'; Why = 'The QR encoder is plain C#, but the image classes QRCode, Base64QRCode and ArtQRCode draw with System.Drawing (blocked).'; Fix = 'Use PngByteQRCode (or SvgQRCode): Convert.ToBase64String(new PngByteQRCode(data).GetGraphic(20)) gives the same base64 PNG without System.Drawing.' },
+    @{ Rx = '^System\.Drawing(\.Common)?$'; Name = 'System.Drawing'; Status = 'Review'; Why = 'Referenced by the project. Any code that uses it (GDI+ graphics) fails in Sandbox - the Graphics / ThirdParty hits show where; a library may also use it internally.'; Fix = 'Remove the reference if nothing needs it; replace the code or library feature that uses it.' },
+    @{ Rx = '^(PresentationCore|PresentationFramework|WindowsBase|System\.Windows\.Forms)$'; Name = 'WPF / Windows Forms'; Status = 'Review'; Why = 'User-interface assemblies - any use from a plug-in fails in Sandbox. Often a leftover reference.'; Fix = 'Remove the reference if nothing uses it (the build confirms).' },
+    @{ Rx = '^Syncfusion\.(DocToPDFConverter|DocToPdfConverter|XlsIORenderer|PresentationRenderer|HtmlToPdfConverter|Pdf\.Imaging)'; Name = 'Syncfusion conversion (Word / Excel / HTML to PDF)'; Status = 'Review'; Why = 'Converting documents to PDF draws the pages with System.Drawing (GDI+) in the .NET Framework builds - likely to fail in Sandbox. Large DLLs (16 MB limit when merged).'; Fix = 'Test the exact conversion in a Sandbox plug-in, or confirm with Syncfusion; otherwise move the conversion outside the plug-in (Azure Function, Power Automate).' },
+    @{ Rx = '^Syncfusion\.'; Name = 'Syncfusion'; Status = 'Review'; Why = 'Large commercial library; some features use System.Drawing or the file system.'; Fix = 'Test the features you use in Sandbox; load the licence key from CRM data, never from a file.' },
+    @{ Rx = '^(iTextSharp|itextsharp|itext7|itext\..+)$'; Name = 'iTextSharp / iText'; Status = 'Review'; Why = 'Writing PDFs is managed code, but fonts from disk (FontFactory.Register*) and System.Drawing.Image overloads are blocked. AGPL licence.'; Fix = 'Load fonts from embedded resources / byte arrays; pass images as byte arrays.' },
+    @{ Rx = '^(PDFsharp|PDFsharp-gdi|PDFsharp-wpf|PDFsharp-MigraDoc|PDFsharp-MigraDoc-gdi|PDFsharp-MigraDoc-wpf|MigraDoc)$'; Name = 'PDFsharp / MigraDoc'; Status = 'Review'; Why = 'The GDI and WPF builds draw with System.Drawing / WPF (blocked).'; Fix = 'Use the Core build of PDFsharp / MigraDoc (no GDI+), with fonts from embedded resources.' },
+    @{ Rx = '^EPPlus'; Name = 'EPPlus'; Status = 'Review'; Why = 'Reading and writing cells works; AutoFitColumns, pictures and charts use System.Drawing. EPPlus 5+ needs a commercial licence.'; Fix = 'Avoid AutoFitColumns / pictures (set column widths), or generate the file outside the plug-in.' },
+    @{ Rx = '^ClosedXML$'; Name = 'ClosedXML'; Status = 'Review'; Why = 'AdjustToContents and images use System.Drawing; depends on DocumentFormat.OpenXml.'; Fix = 'Avoid AdjustToContents / images, or generate the file outside the plug-in.' },
+    @{ Rx = '^DocumentFormat\.OpenXml'; Name = 'Open XML SDK'; Status = 'Review'; Why = 'Managed code, but System.IO.Packaging can switch to isolated storage for large parts (about 10 MB), which Sandbox blocks.'; Fix = 'Keep documents small, or test with the largest real document.' },
+    @{ Rx = '^ZXing\.Net'; Name = 'ZXing.Net'; Status = 'Review'; Why = 'BarcodeWriter (Bitmap) draws with System.Drawing.'; Fix = 'Use BarcodeWriterSvg or BarcodeWriterPixelData and encode the bytes yourself.' },
+    @{ Rx = '^Aspose\.'; Name = 'Aspose'; Status = 'Review'; Why = 'Rendering uses System.Drawing in the .NET Framework builds; a licence loaded from a file is blocked.'; Fix = 'Load the licence from a stream / embedded resource; test the rendering in Sandbox.' },
+    @{ Rx = '^(Microsoft\.ReportViewer\..+|Microsoft\.ReportingServices\.ReportViewerControl\..+)$'; Name = 'ReportViewer (local reports)'; Status = 'Blocked'; Why = 'Local report rendering needs full trust and GDI+.'; Fix = 'Render outside the plug-in - see "Report rendering".' },
+    @{ Rx = '^(log4net|NLog|Serilog.*)$'; Name = 'Logging library'; Status = 'Blocked'; Why = 'Writes to files / event log.'; Fix = 'Use ITracingService.' },
+    @{ Rx = '^(Dapper|EntityFramework)$'; Name = 'SQL access'; Status = 'Blocked'; Why = 'Direct database access is blocked.'; Fix = 'Use IOrganizationService.' },
+    @{ Rx = '^Newtonsoft\.Json$'; Name = 'Newtonsoft.Json'; Status = 'Handled'; Why = 'Replaced by the serializer migration.'; Fix = 'See references/serializer-rules.md.' },
+    @{ Rx = '^(RestSharp|HtmlAgilityPack|CsvHelper|Polly)$'; Name = $null; Status = 'OK'; Why = 'Plain managed code - allowed in Sandbox (HTTP calls get the usual hardening).'; Fix = 'Only packaging matters: plug-in package (plug-ins), or replace with built-in .NET code.' },
+    @{ Rx = '^(WindowsAzure\.Storage|Azure\.Storage\..+|Azure\.Messaging\..+|Microsoft\.Azure\.ServiceBus|Azure\.Core)$'; Name = 'Azure SDK'; Status = 'Review'; Why = 'HTTP-based, but a large dependency tree.'; Fix = 'For Service Bus / Event Hub prefer a registered service endpoint (IServiceEndpointNotificationService); otherwise a plug-in package.' }
+)
+$libNames = New-Object System.Collections.Generic.List[object]
+foreach ($r in (Get-XmlNodes $projXml 'Reference')) {
+    $libNames.Add([pscustomobject]@{ Name = ($r.GetAttribute('Include') -split ',')[0].Trim(); From = 'Reference' })
+    foreach ($ch in $r.ChildNodes) { if ($ch.LocalName -eq 'HintPath') { $libNames.Add([pscustomobject]@{ Name = ([IO.Path]::GetFileNameWithoutExtension(($ch.InnerText -replace '[\\/]', $sep))); From = 'Reference' }) } }
+}
+foreach ($id in $allPkgIds) { $libNames.Add([pscustomobject]@{ Name = $id; From = 'package' }) }
+if ($merge) { foreach ($m in $merge.MergedLibraries) { $libNames.Add([pscustomobject]@{ Name = $m; From = 'merged' }) } }
+$thirdParty = New-Object System.Collections.Generic.List[object]
+$seenLib = @{}
+foreach ($ln in $libNames) {
+    foreach ($kl in $knownLibs) {
+        if ($ln.Name -match $kl.Rx) {
+            $label = if ($kl.Name) { $kl.Name } else { $ln.Name }
+            if ($seenLib.ContainsKey($label)) { if ($seenLib[$label].Matched -notcontains $ln.Name) { $seenLib[$label].Matched += $ln.Name } }
+            else {
+                $o = [pscustomobject]@{ Library = $label; Matched = @($ln.Name); Status = $kl.Status; Why = $kl.Why; Fix = $kl.Fix; Merged = $false }
+                $seenLib[$label] = $o; $thirdParty.Add($o)
+            }
+            if ($ln.From -eq 'merged') { $seenLib[$label].Merged = $true }
+            break
+        }
+    }
+}
+
+# ---- report rendering (SSRS web service / ReportViewer): no Online equivalent for a plug-in
+$reportRendering = New-Object System.Collections.Generic.List[object]
+foreach ($wr in (Get-XmlNodes $projXml 'WebReferenceUrl')) {
+    $u = $wr.GetAttribute('Include')
+    if ($u -match '(?i)reportserver|reportexecution2005|reportservice2010') { $reportRendering.Add([pscustomobject]@{ Kind = 'SSRS web service'; Where = 'web reference in the .csproj'; Line = $null; Detail = $u }) }
+}
+foreach ($h in $hits) {
+    if ($h.Category -ne 'Reporting' -or $h.Accepted) { continue }
+    if ($h.File -match '(?i)[\\/](Web References|Connected Services|Service References)[\\/]') { continue }
+    $kind = if ($h.Api -like 'ReportViewer*') { 'ReportViewer local report' } else { 'SSRS web service' }
+    $reportRendering.Add([pscustomobject]@{ Kind = $kind; Where = $h.File; Line = $h.Line; Detail = $h.Text })
+}
+$reportNote = $null
+if ($reportRendering.Count) { $reportNote = 'Renders reports through SQL Server Reporting Services or ReportViewer. Dataverse Online has no Report Server web service that a plug-in can call, so this needs a redesign for Online (see references/online-checklist.md, "Report rendering"). On-premises Sandbox: the web service call is allowed over HTTP(S) to a DNS name; ReportViewer local rendering is blocked.' }
 
 $online = [pscustomobject]@{
     TargetFramework      = $fwInfo
@@ -1020,6 +1151,9 @@ $online = [pscustomobject]@{
     HttpCalls            = $httpCalls.ToArray()
     UrlLiterals          = $urlLiterals.ToArray()
     LoopRisks            = $loopRisks.ToArray()
+    MergeTool            = $merge
+    ThirdPartyLibraries  = $thirdParty.ToArray()
+    ReportRendering      = [pscustomobject]@{ Found = ($reportRendering.Count -gt 0); Items = $reportRendering.ToArray(); Note = $reportNote }
 }
 
 # ---------------------------------------------------------------- configured serializer check
@@ -1164,6 +1298,14 @@ Write-Output ("Version:   {0} - {1}" -f $versionInfo.Value, $versionInfo.Note)
 Write-Output ("Entry points: {0} plug-in(s), {1} workflow activit(ies){2}" -f $plugins.Count, $workflows.Count, $(if ($workflows.Count) { ' -> plug-in packages NOT available; assembly must have no runtime dependencies' } else { '' }))
 foreach ($ae in $assumedEntries) { Write-Output ("  assumed {0}: {1} (base class {2} is not in the source - confirm)" -f $ae.Kind, $ae.Class, $ae.Base) }
 Write-Output ("Dependency candidates (confirm against the compiled DLL): {0}" -f $(if ($deps.Count) { ($deps | ForEach-Object { "$($_.Name) ($($_.Kind))" }) -join ', ' } else { 'none' }))
+if ($merge) {
+    Write-Output ("Merge tool: {0} ({1}) -> merged libraries are REAL dependencies: {2}" -f $merge.Tool, (($merge.Evidence | Select-Object -First 3) -join '; '), $(if ($merge.MergedLibraries.Count) { $merge.MergedLibraries -join ', ' } else { 'none found' }))
+}
+foreach ($tl in $thirdParty) { if ($tl.Status -ne 'OK') { Write-Output ("Library: {0} [{1}]{2} - {3}" -f $tl.Library, $tl.Status, $(if ($tl.Merged) { ' (merged)' } else { '' }), $tl.Why) } }
+if ($reportRendering.Count) {
+    Write-Output ("Report rendering: {0} place(s) - needs a redesign for Dataverse Online" -f $reportRendering.Count)
+    foreach ($rr in $reportRendering) { Write-Output ("  {0}: {1}{2} {3}" -f $rr.Kind, (Get-Rel $rr.Where), $(if ($rr.Line) { ":$($rr.Line)" } else { '' }), $(if ($rr.Kind -eq 'SSRS web service' -and -not $rr.Line) { $rr.Detail } else { '' })) }
+}
 Write-Output "HTTP calls (file:line member call -> url source):"
 foreach ($hc in $httpCalls) {
     $src = if ($hc.Url) { "$($hc.UrlSource) $($hc.Url) [$($hc.UrlClass): $($hc.UrlDetail)]" } else { "$($hc.UrlSource) $($hc.UrlKey)" }

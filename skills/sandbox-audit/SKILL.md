@@ -70,7 +70,8 @@ In the same chat, reuse earlier answers instead of asking again, and say which o
    ```
    powershell -NoProfile -ExecutionPolicy Bypass -File "<skill base dir>\scripts\scan.ps1" -Project "<path to .csproj>" -SolutionRoot "<solution root>" -OutFile "<scratchpad or %TEMP%>\sandbox-scan-<Project>.json"
    ```
-3. The console output gives counts and one line per hit. The JSON file has everything — every field is described in `references/scanner-output.md`. The ones used most: `Settings` (team settings, `Errors`, `Warnings`), `SerializerCheck`, `VersionControl`, `Files[]` (with `Source` and `SharedBy`), `Hits[]` (with `Member`, `InDebug`, `Accepted`), `ExistingAppSerializers[]`, and `OnlineReadiness` (`TargetFramework`, `Signing`, `AssemblyVersion`, `EntryPoints`, `DependencyCandidates`, `HttpCalls`, `UrlLiterals`, `LoopRisks`).
+3. The console output gives counts and one line per hit. The JSON file has everything — every field is described in `references/scanner-output.md`. The ones used most: `Settings` (team settings, `Errors`, `Warnings`), `SerializerCheck`, `VersionControl`, `Files[]` (with `Source` and `SharedBy`), `Hits[]` (with `Member`, `InDebug`, `Accepted`), `ExistingAppSerializers[]`, and `OnlineReadiness` (`TargetFramework`, `Signing`, `AssemblyVersion`, `EntryPoints`, `DependencyCandidates`, `HttpCalls`, `UrlLiterals`, `LoopRisks`, `MergeTool`, `ThirdPartyLibraries`, `ReportRendering`).
+   If `MergeTool`, `ThirdPartyLibraries` (other than `OK`) or `ThirdParty` hits are present, read `references/third-party-libraries.md`. If `ReportRendering.Found`, read the "Report rendering" section of `references/online-checklist.md`.
 
    Severity meanings: **Blocked** = fails in Sandbox if executed · **Avoid** = unsupported or unreliable in plug-ins · **Review** = depends on usage, read in context · **Harden** = allowed, apply HTTP hardening · **Using** = namespace import only. Counts exclude **Accepted** findings.
 
@@ -121,7 +122,8 @@ Process DTOs and helpers first, then plugins and workflows. For each hit, decide
 3. **In a `linked` or `shared` file** → follow **Shared File Rule** below.
 4. **Review hits** → read the code; fix only if it actually violates Sandbox (e.g. `StreamReader` on a file path, not on a stream).
 5. **Avoid hits** → fix only when the replacement is mechanical and keeps behaviour (e.g. a fire-and-forget `new Thread(() => Log(x)).Start()` → `Log(x)`); otherwise report under "Needs decision".
-6. **Network design hits** — IP-address or internal URLs, Windows credentials (`UseDefaultCredentials`, `CredentialCache.DefaultCredentials`) → **never change the URL or the authentication** yourself. These need an infrastructure decision (public DNS name, API Management, token auth). Report them in Step 7.
+6. **Third-party library hits** (`ThirdParty`) → fix only with the replacement given in `references/third-party-libraries.md` (e.g. QRCoder `Base64QRCode` → `PngByteQRCode`); anything else → "Needs decision". **Report rendering** (`Reporting`) → never rebuild it; "Needs decision" with the Online alternatives.
+7. **Network design hits** — IP-address or internal URLs, Windows credentials (`UseDefaultCredentials`, `CredentialCache.DefaultCredentials`) → **never change the URL or the authentication** yourself. These need an infrastructure decision (public DNS name, API Management, token auth). Report them in Step 7.
 
 Fix in-place with the Edit tool:
 - Replace blocked API calls with Sandbox-safe alternatives (`references/blocked-apis.md`)
@@ -228,7 +230,7 @@ If packages were removed from `packages.config`, also remove the corresponding `
    - **Missing parameterless constructor** → add `public ClassName() { }`
 4. Rebuild after fixes, max 5 attempts. If still failing, stop and report the remaining errors.
 5. **DLL checks** from `Dll` in the build JSON (or `build.ps1 -InspectOnly -Dll <path>` when the team builds another way):
-   - **Runtime dependencies** = `Dll.RuntimeDependencies` (references other than .NET Framework and the CRM SDK). This is the real list — `DependencyCandidates` from the scan are only `.csproj` entries.
+   - **Runtime dependencies** = `Dll.RuntimeDependencies` (references other than .NET Framework and the CRM SDK). This is the real list — `DependencyCandidates` from the scan are only `.csproj` entries. **Exception:** when the scan has `MergeTool`, the build merges libraries into the DLL, so `RuntimeDependencies` is empty — use `MergeTool.MergedLibraries` instead and never report "no dependencies" for a merged project.
    - **Signed** = `Dll.Signed`.
    - **Size** = `Dll.WithinSizeLimit` (16 MB).
    - **Version** = compare major.minor of `Dll.Version` with the version at the baseline (git: `git show <base commit>:<path of AssemblyInfo.cs or .csproj>`; TFVC: `tf view "<path>" /version:T` or the scan's `AssemblyVersion` taken before editing). If major or minor changed, warn: the Plugin Registration Tool treats it as a different assembly, so the in-place update fails or steps/workflows stay bound to the old one.
@@ -251,6 +253,9 @@ Skip the online-only rows when the target is on-premises (Step 1). Use `referenc
    - none → ✅
    - some, and `ContainsWorkflowActivities` → ❌ "plug-in packages don't support workflow activities — compile the code in via linked files or remove the dependency"
    - some, plug-ins only → ⚠️ "deploy as a plug-in package, or remove the dependency"
+   - **merged** (`MergeTool`) → list `MergedLibraries` as the dependencies and apply the two rows above; add "<tool> is not supported by Microsoft — on-premises Sandbox it is the usual workaround; for Online use a plug-in package (plug-ins) or replace / compile in the library (workflow activities)"
+   - **Third-party libraries** — one row per `ThirdPartyLibraries` entry that is not `OK`: `Blocked` → ❌, `Review` → ⚠️ with the feature to test in Sandbox (`references/third-party-libraries.md`)
+   - **Report rendering** — if `ReportRendering.Found`: ❌ Online "needs a redesign — no Report Server web service in Online" (⚠️ on-premises for the SSRS web service, ❌ for ReportViewer), with the alternatives from `references/online-checklist.md`
 4. **Loop risks** — each `LoopRisks` entry → ⚠️ with file, line and loop line. Report only; do not redesign.
 5. **Overall**: ❌ if any row is ❌, else ⚠️ if any row is ⚠️, else ✅.
 6. **What the team must do before go-live** — a short numbered list built from every ❌ and ⚠️ row, most serious first.

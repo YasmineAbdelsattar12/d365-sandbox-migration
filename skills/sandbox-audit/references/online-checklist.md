@@ -61,7 +61,7 @@ In addition to the hardening rules in `code-patterns.md`:
 
 ## 4. Dependent Assemblies (DLLs the plug-in needs at runtime)
 
-- **ILMerge is not supported** by Microsoft.
+- **ILMerge / ILRepack / Costura are not supported** by Microsoft. When the scan reports `MergeTool`, the merged libraries are runtime dependencies even though the built DLL shows none — use `MergeTool.MergedLibraries` (see `third-party-libraries.md`). Merging does not make a library Sandbox-safe: check each one against `third-party-libraries.md`.
 - The supported replacement is **plug-in packages** (dependent assemblies). Limits:
   - **Custom workflow activities are NOT supported** in plug-in packages
   - Not available on-premises
@@ -103,3 +103,22 @@ Framework assemblies (`mscorlib`, `System.*` that ship with .NET Framework) and 
 | Direct SQL to the CRM database or other databases | Organization service / Web API; external DBs via an API |
 | Server-side scheduled jobs on the CRM machine | Power Automate (scheduled) or Azure Functions (timer) |
 | `SandboxWorkerOutboundUriPattern` registry setting (on-prem Sandbox network allow-list) | Does not exist online — the rules in section 1 are fixed |
+
+## Report rendering (SSRS / ReportViewer)
+
+Found by the scan as `OnlineReadiness.ReportRendering` (web references to `ReportExecution2005.asmx` / `ReportService2010.asmx`, `ReportExecutionService`, `ReportViewer`, `LocalReport`).
+
+| Pattern | On-premises Sandbox | Dataverse Online |
+|---|---|---|
+| Plug-in calls the **SSRS Report Server web service** to render a report (usually to PDF) | ⚠️ allowed as an HTTP(S) call to a DNS name — but check the Windows / NTLM credentials and plain `http` | ❌ **needs a redesign** — Online has no Report Server web service a plug-in can call |
+| Plug-in renders with **ReportViewer / LocalReport** | ❌ blocked (full trust, GDI+) | ❌ |
+
+The `.rdl` reports themselves are a separate question: FetchXML-based reports (`MSCRMFETCH` data source) can be uploaded to Online and run by users; SQL-based ones cannot. Only the **automatic rendering from code** is blocked here.
+
+Alternatives for Online (team decision — the skill never rebuilds the feature):
+- **Power Automate**: "Populate a Microsoft Word template" + convert to PDF (OneDrive / Word Online), then save the file to the record — triggered by the same custom action or a flag on the record
+- **Power BI paginated reports** (the same `.rdl`, moved to Power BI) with the "Export to file" API, called from Power Automate or an Azure Function
+- **Dataverse Word templates** for simple documents users generate themselves
+- **An Azure Function** with a PDF library, called from the plug-in over HTTPS (DNS name, token auth)
+
+Report it under **Needs decision** with the custom action / step that triggers it, the reports it renders (look for the report names in the code) and where the output is saved.

@@ -14,6 +14,9 @@
 | `ExistingAppSerializers[]` | Every class named like `SerializerCheck.ClassName` in the solution: `Path`, `Namespace`, `Visibility`, `CompiledIntoThisProject`, `OwnedBy`, `LinkedBy`, `Reusable`, `Upgrade`, `Reasons[]` — input for "Placing the Serializer" |
 | `ProjectStyle` | `legacy` (old-style `.csproj` / `packages.config`) or `sdk` |
 | `OnlineReadiness.TargetFramework` / `.Signing` / `.AssemblyVersion` | `Status` + `Note` for each — input for Step 7 |
+| `OnlineReadiness.MergeTool` | `null`, or `Tool` (ILMerge / ILRepack / Costura), `Evidence[]`, `MergedLibraries[]`, `MergedFrom`, `Note`. Merged libraries are real runtime dependencies even though the built DLL shows none |
+| `OnlineReadiness.ThirdPartyLibraries[]` | Libraries from the known list (`references/third-party-libraries.md`) found in references, packages or merged libraries: `Library`, `Matched[]`, `Status` (Blocked / Review / OK / Handled), `Why`, `Fix`, `Merged` |
+| `OnlineReadiness.ReportRendering` | `Found`, `Items[]` (`Kind`: SSRS web service / ReportViewer local report, `Where`, `Line`, `Detail`), `Note` — report rendering that needs a redesign for Online |
 | `OnlineReadiness.EntryPoints` | Plug-in and workflow-activity classes as full names (`Namespace.Class`), resolved through custom base classes. `Assumed[]` lists classes counted only because their base class comes from a referenced DLL and is named like a plug-in / activity base — confirm them. `ContainsWorkflowActivities` decides whether plug-in packages are possible |
 | `OnlineReadiness.DependencyCandidates` | Non-framework references / packages / project references — confirmed against the compiled DLL in Step 6 |
 | `OnlineReadiness.HttpCalls[]` | Every HTTP call: `Call`, `UrlExpr`, best-effort `UrlSource` (`Hardcoded` / `Configuration` / `WorkflowInput` / `StepConfig` / `Parameter` / `Relative` / `Unknown`), `UrlKey`, `Url`, `UrlClass`, `InLoop`, `Accepted` |

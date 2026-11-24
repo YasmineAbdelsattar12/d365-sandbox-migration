@@ -100,14 +100,24 @@ foreach ($pf in $projects) {
         if ($o.ContainsWorkflowActivities -and $deps.Count) { $online = 'fail'; $onlineWhy.Add('workflow activities with references to check (a real DLL dependency cannot go Online): ' + (($deps | ForEach-Object { $_.Name }) -join ', ')) }
         if ($o.TargetFramework.Status -eq 'Blocked') { $online = 'fail'; $onlineWhy.Add("framework $($o.TargetFramework.Value)") }
         if (@($live | Where-Object { $_.Category -eq 'Auth' -and $_.Severity -eq 'Blocked' }).Count) { $online = 'fail'; $onlineWhy.Add('Windows credentials') }
+        $rr = $o.ReportRendering
+        if ($rr -and $rr.Found) { $online = 'fail'; $onlineWhy.Add('report rendering (SSRS / ReportViewer) - needs a redesign for Online') }
+        $libs = @($o.ThirdPartyLibraries | Where-Object { $_ })
+        $libBlocked = @($libs | Where-Object { $_.Status -eq 'Blocked' })
+        $libReview = @($libs | Where-Object { $_.Status -eq 'Review' })
+        if ($libBlocked.Count) { $online = 'fail'; $onlineWhy.Add('blocked library: ' + (($libBlocked | ForEach-Object { $_.Library }) -join ', ')) }
+        $mt = $o.MergeTool
+        if ($mt) { $onlineWhy.Add("$($mt.Tool) merges $(@($mt.MergedLibraries).Count) librar(ies) into the DLL - real dependencies, not supported by Microsoft") }
         if ($online -ne 'fail') {
+            if ($libReview.Count) { $online = 'warn'; $onlineWhy.Add('libraries to test in Sandbox: ' + (($libReview | ForEach-Object { $_.Library }) -join ', ')) }
+            if ($mt) { $online = 'warn' }
             if ($configUrls.Count) { $online = 'warn'; $onlineWhy.Add("$($configUrls.Count) URL(s) from configuration / inputs to confirm") }
             if (@($o.LoopRisks).Count) { $online = 'warn'; $onlineWhy.Add("$(@($o.LoopRisks).Count) call(s) inside loops") }
             if ($o.TargetFramework.Status -eq 'Check') { $online = 'warn'; $onlineWhy.Add("framework $($o.TargetFramework.Value)") }
             if ($o.Signing.Status -ne 'Ready') { $online = 'warn'; $onlineWhy.Add('not signed') }
             if (-not $o.ContainsWorkflowActivities -and $deps.Count) { $online = 'warn'; $onlineWhy.Add("$($deps.Count) reference(s) to check - not confirmed by a build: " + (($deps | ForEach-Object { $_.Name }) -join ', ')) }
         }
-        $effort = if ($online -eq 'fail' -or $work -gt 10) { 'High' } elseif ($work -gt 0 -or $serializerHits -or $configUrls.Count -or @($o.HttpCalls).Count -gt 3) { 'Medium' } else { 'Low' }
+        $effort = if ($online -eq 'fail' -or $work -gt 10 -or ($rr -and $rr.Found)) { 'High' } elseif ($work -gt 0 -or $serializerHits -or $configUrls.Count -or @($o.HttpCalls).Count -gt 3) { 'Medium' } else { 'Low' }
 
         $skip = $null
         $hintFullTrust = $pf.BaseName -match '(?i)(\bApi\b|\.Api$|Portal|\bWeb\b|\.Web$|Tests?$|UnitTest|Console)'
@@ -124,6 +134,9 @@ foreach ($pf in $projects) {
         $row.SerializerFindings = $serializerHits; $row.UrlProblems = $urlProblems; $row.UrlsToConfirm = $configUrls.Count
         $row.LoopRisks = @($o.LoopRisks).Count; $row.DependencyCandidates = @($deps | ForEach-Object { $_.Name })
         $row.Signing = $o.Signing.Status; $row.Version = $o.AssemblyVersion.Value
+        $row.MergeTool = $(if ($mt) { $mt.Tool } else { $null }); $row.MergedLibraries = $(if ($mt) { @($mt.MergedLibraries) } else { @() })
+        $row.Libraries = @($libs | Where-Object { $_.Status -ne 'OK' } | ForEach-Object { "$($_.Library) [$($_.Status)]" })
+        $row.ReportRendering = [bool]($rr -and $rr.Found)
         $row.Effort = $effort; $row.OnlineEstimate = $online; $row.OnlineWhy = $onlineWhy.ToArray()
         $row.VersionControl = $j.VersionControl.Type
     } catch {
