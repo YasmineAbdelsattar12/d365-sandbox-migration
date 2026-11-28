@@ -224,6 +224,20 @@ function Get-XmlNodes([xml]$doc, [string]$name) {
     return @($doc.SelectNodes("//*[local-name()='$name']"))
 }
 
+function Get-NonAssemblyReason([xml]$px, [string]$name) {
+    # $null for plug-in / workflow / class-library projects; otherwise why the project runs in full trust outside CRM
+    if (@($skipProjects | Where-Object { $name -like $_ }).Count) { return 'in skipProjects' }
+    $sdkA = $px.DocumentElement.GetAttribute('Sdk')
+    $guids = (@(Get-XmlNodes $px 'ProjectTypeGuids') | ForEach-Object { $_.InnerText }) -join ';'
+    if ($sdkA -match '(?i)\.Web' -or $guids -match '(?i)349C5851-65DF-11DA-9384-00065B846F21|E3E379DF-F4C6-4180-9B81-6769533ABE47|E53F8FEA-EAE0-44A6-8774-FFD645390401') { return 'web project (API / Portal / site)' }
+    $outT = (@(Get-XmlNodes $px 'OutputType') | Select-Object -First 1).InnerText
+    if ($outT -match '(?i)exe') { return 'application (console / service / job)' }
+    $refsTxt = (@(Get-XmlNodes $px 'Reference') + @(Get-XmlNodes $px 'PackageReference') | ForEach-Object { $_.GetAttribute('Include') }) -join ';'
+    if ($name -match '(?i)(Tests?$|UnitTest)' -or $refsTxt -match '(?i)UnitTestFramework|MSTest\.TestFramework|\bxunit\b|\bnunit\b' -or (@(Get-XmlNodes $px 'IsTestProject') | Where-Object { $_.InnerText -eq 'true' }).Count) { return 'test project' }
+    if ($name -match '(?i)(\bApi\b|\.Api$|Portal|\bWeb\b|\.Web$|Console)') { return 'name looks like API / Portal / web / console' }
+    return $null
+}
+
 function Get-CompileFiles([string]$file, [bool]$isSdk) {
     # Returns list of @{ Path; Include; Link; Source } for one .csproj or .projitems
     [xml]$doc = Get-Content -LiteralPath $file -Raw
@@ -668,6 +682,7 @@ function New-HelperInfo([string]$path, [string]$name) {
     }
 }
 $solutionProjects = 0
+$nonAssembly = @{}     # project name -> why it is not a plug-in / workflow assembly (API, Portal, exe, tests, skipProjects)
 if (-not $SolutionRoot) {
     # no solution root: only helpers already compiled into this project can be found
     foreach ($fp in $files.Keys) {
@@ -724,6 +739,8 @@ if ($SolutionRoot) {
         try {
             [xml]$px = Get-Content -LiteralPath $pf.FullName -Raw
             $sdk = [bool]$px.DocumentElement.GetAttribute('Sdk')
+            $why = Get-NonAssemblyReason $px $pf.BaseName
+            if ($why -and -not $nonAssembly.ContainsKey($pf.BaseName)) { $nonAssembly[$pf.BaseName] = $why }
             if ($referencedProjects.Count) {
                 foreach ($rp in (Get-ProjRefPaths $px $pf.DirectoryName)) {
                     if (-not $refBy.ContainsKey($rp)) { $refBy[$rp] = New-Object System.Collections.Generic.List[string] }
@@ -759,6 +776,9 @@ if ($refBy -and $referencedProjects.Count) {
         }
         $rpj.ReferencedBy = $users.ToArray()
     }
+}
+foreach ($rpj in $referencedProjects) {
+    $rpj | Add-Member -NotePropertyName UsedByNonAssembly -NotePropertyValue @(@($rpj.ReferencedBy) | Where-Object { $nonAssembly.ContainsKey($_) } | ForEach-Object { [pscustomobject]@{ Project = $_; Reason = $nonAssembly[$_] } }) -Force
 }
 foreach ($a in $appSerializers) {
     if ($linkCount.ContainsKey($a.Path)) { $a.LinkedBy = $linkCount[$a.Path].ToArray() }
@@ -1005,11 +1025,18 @@ foreach ($f in $files.Values) {
     }
     $sharedBy = $null
     if ($f.Source -eq 'referenced') {
+        # projects that reference the owning project, plus projects that link this file directly
         $own = $referencedProjects | Where-Object { $_.Name -eq $f.ReferencedProject } | Select-Object -First 1
-        if ($own -and @($own.ReferencedBy).Count) { $sharedBy = @($own.ReferencedBy) }
+        $u = New-Object System.Collections.Generic.List[string]
+        if ($own) { foreach ($x in @($own.ReferencedBy)) { if ($x -and -not $u.Contains($x)) { $u.Add($x) } } }
+        if ($linkCount.ContainsKey($f.Path)) { foreach ($x in $linkCount[$f.Path]) { if ($x -ne $f.ReferencedProject -and -not $u.Contains($x)) { $u.Add($x) } } }
+        if ($u.Count) { $sharedBy = $u.ToArray() }
     }
     elseif ($linkCount.ContainsKey($f.Path)) { $sharedBy = $linkCount[$f.Path].ToArray() }
+    $outsideUsers = @()
+    if ($f.Source -ne 'local' -and $sharedBy) { $outsideUsers = @(@($sharedBy) | Where-Object { $nonAssembly.ContainsKey($_) } | ForEach-Object { [pscustomobject]@{ Project = $_; Reason = $nonAssembly[$_] } }) }
     $fileRows.Add([pscustomobject]@{
+        SharedByNonAssembly = $outsideUsers
         Path = $f.Path; Source = $f.Source; Include = $f.Include; Link = $f.Link; ReferencedProject = $f.ReferencedProject
         Exists = $exists; Hits = $count; Types = $types
         SharedByProjects = $(if ($sharedBy) { $sharedBy.Count } else { $null })
@@ -1391,6 +1418,11 @@ foreach ($ae in $assumedEntries) { Write-Output ("  assumed {0}: {1} (base class
 Write-Output ("Dependency candidates (confirm against the compiled DLL): {0}" -f $(if ($deps.Count) { ($deps | ForEach-Object { "$($_.Name) ($($_.Kind))" }) -join ', ' } else { 'none' }))
 if ($merge) {
     Write-Output ("Merge tool: {0} ({1}) -> merged libraries are REAL dependencies: {2}" -f $merge.Tool, (($merge.Evidence | Select-Object -First 3) -join '; '), $(if ($merge.MergedLibraries.Count) { $merge.MergedLibraries -join ', ' } else { 'none found' }))
+}
+$outsideFiles = @($fileRows | Where-Object { @($_.SharedByNonAssembly).Count -and $_.Hits -gt 0 })
+if ($outsideFiles.Count) {
+    Write-Output ("Shared code with findings that non-plug-in projects also use ({0} file(s)) - ask before editing:" -f $outsideFiles.Count)
+    foreach ($of in ($outsideFiles | Select-Object -First 15)) { Write-Output ("  {0} -> {1}" -f (Get-Rel $of.Path), ((@($of.SharedByNonAssembly) | ForEach-Object { "$($_.Project) ($($_.Reason))" }) -join ', ')) }
 }
 foreach ($tl in $thirdParty) { if ($tl.Status -ne 'OK') { Write-Output ("Library: {0} [{1}]{2} - {3}" -f $tl.Library, $tl.Status, $(if ($tl.Merged) { ' (merged)' } else { '' }), $tl.Why) } }
 if ($reportRendering.Count) {

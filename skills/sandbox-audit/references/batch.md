@@ -80,6 +80,7 @@ For each entry in `SharedProblems`, decide **once**, following the Shared File R
 - reachable from plug-in code in any batch project → fix it once now (behaviour-identical fix), build-check one project that compiles it, and — with per-project commits — commit it alone as `Sandbox migration: shared files`
 - not reachable anywhere → `Left in place`, with the evidence
 - unclear, or linked by many projects outside the batch → `Needs decision`; projects leave it untouched
+- **also used by a non-plug-in project** (`SharedByNonAssembly` in any project's scan: API, Portal, web, console / job, tests, `skipProjects`) → ask the developer now (AskUserQuestion: **Edit it** / **Leave it**), naming those projects; never decide it alone. **Edit it** → record `Fixed once` and the projects to test
 
 Record each in `SharedDecisions`. Every project then gets the same answer.
 
@@ -95,6 +96,7 @@ Settings file: <path or none> (the scanner finds it).
 Shared-file decisions already made for this batch - follow them, do not re-decide:
   - <file>: <Fixed once | Left in place | Needs decision> - <reason>
 Do NOT ask questions: anything that needs a decision goes into NeedsDecision. Do NOT commit, check in or shelve.
+Do NOT edit any linked / shared / referenced file whose SharedByNonAssembly is not empty, unless the decisions above say "Fixed once" for it - put it in NeedsDecision with the fix and the affected projects.
 Do NOT create a PDF report.
 When done, reply with ONLY this JSON:
 { "Name": "...", "Status": "migrated|needs-work|build-failed|error", "FilesModified": n, "ChangedPaths": [...],
