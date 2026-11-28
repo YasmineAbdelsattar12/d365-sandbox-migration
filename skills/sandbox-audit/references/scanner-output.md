@@ -10,6 +10,7 @@
 | `UnresolvedIncludes` | `<Compile Include>` values with MSBuild properties the script could not expand — resolve these manually |
 | `LocalCsNotCompiled` | `.cs` files in the folder that are NOT in the `.csproj` — not compiled, ignore them |
 | `References`, `PackagesConfig`, `PackageReferences`, `ProjectReferences` | Inputs for Step 5 |
+| `ReferencedProjects[]` | Projects reached through `<ProjectReference>`, directly or indirectly: `Name`, `Path`, `Exists`, `AssemblyName`, `Via` (the project that references it), `Depth`, `Files` (scanned), `ReferencedBy` (every project in the solution that uses it, directly or indirectly). Their files are in `Files[]` with `Source = 'referenced'` and `ReferencedProject`; their hits carry `ReferencedProject`. `Counts.Files` counts only files compiled into this DLL; `Counts.Referenced` counts the referenced ones |
 | `ExistingHelpers[]` | Every `MimeTypeHelper` / `QueryStringHelper` / `EnvironmentVariableHelper` class in the solution (or in this project, without `-SolutionRoot`): `Name`, `Path`, `Namespace`, `Visibility`, `CompiledIntoThisProject`, `OwnedBy`, `LinkedBy`, `Reusable`, `Reasons[]` — input for `shared-helpers.md` |
 | `ExistingAppSerializers[]` | Every class named like `SerializerCheck.ClassName` in the solution: `Path`, `Namespace`, `Visibility`, `CompiledIntoThisProject`, `OwnedBy`, `LinkedBy`, `Reusable`, `Upgrade`, `Reasons[]` — input for "Placing the Serializer" |
 | `ProjectStyle` | `legacy` (old-style `.csproj` / `packages.config`) or `sdk` |

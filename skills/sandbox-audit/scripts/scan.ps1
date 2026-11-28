@@ -591,6 +591,53 @@ if (-not $isSdk) {
         Where-Object { $_.FullName -notmatch $excludeDirs -and -not $files.ContainsKey($_.FullName) } |
         ForEach-Object { $_.FullName.Substring($projDir.Length).TrimStart('\', '/') })
 }
+
+# ---- referenced projects (<ProjectReference>): their code runs inside this plug-in too, in Sandbox, but in another DLL.
+# Followed recursively (a referenced project's own references run as well). Files get Source = 'referenced'.
+$referencedProjects = New-Object System.Collections.Generic.List[object]
+$refQueue = New-Object System.Collections.Generic.Queue[object]
+$visitedRefs = New-Object 'System.Collections.Generic.HashSet[string]' $cmp
+[void]$visitedRefs.Add([IO.Path]::GetFullPath($csproj))
+function Get-ProjRefPaths([xml]$doc, [string]$baseDir) {
+    $out = @()
+    foreach ($pr in (Get-XmlNodes $doc 'ProjectReference')) {
+        $inc = $pr.GetAttribute('Include'); if (-not $inc) { continue }
+        $inc = Expand-MsBuildPath $inc $baseDir
+        $full = if ([IO.Path]::IsPathRooted($inc)) { $inc } else { Join-Path $baseDir $inc }
+        $out += [IO.Path]::GetFullPath(($full -replace '[\\/]', $sep))
+    }
+    return $out
+}
+foreach ($rp in (Get-ProjRefPaths $projXml $projDir)) { $refQueue.Enqueue(@{ Path = $rp; Via = $projName; Depth = 1 }) }
+$savedProjDir = $projDir
+while ($refQueue.Count) {
+    $r = $refQueue.Dequeue()
+    if (-not $visitedRefs.Add($r.Path)) { continue }
+    $rName = [IO.Path]::GetFileNameWithoutExtension($r.Path)
+    if (-not (Test-Path -LiteralPath $r.Path)) {
+        $referencedProjects.Add([pscustomobject]@{ Name = $rName; Path = $r.Path; Exists = $false; AssemblyName = $null; Via = $r.Via; Depth = $r.Depth; Files = 0; ReferencedBy = @() })
+        continue
+    }
+    try {
+        [xml]$rx = Get-Content -LiteralPath $r.Path -Raw
+        $rSdk = [bool]$rx.DocumentElement.GetAttribute('Sdk')
+        $script:projDir = Split-Path -Parent $r.Path
+        $rFiles = @(Get-CompileFiles $r.Path $rSdk)
+        $rAsm = (Get-XmlNodes $rx 'AssemblyName' | Select-Object -First 1).InnerText; if (-not $rAsm) { $rAsm = $rName }
+        $n = 0
+        foreach ($x in $rFiles) {
+            if ($x.Path -like 'UNRESOLVED:*' -or $x.Path -notlike '*.cs') { continue }
+            if ($x.Include -match '(?i)(^|[\\/])(Properties[\\/])?AssemblyInfo\.cs$') { continue }
+            if ($files.ContainsKey($x.Path)) { continue }      # already compiled into this DLL (linked) - stays as it is
+            $x.Source = 'referenced'; $x.ReferencedProject = $rName
+            $files[$x.Path] = $x; $n++
+        }
+        $referencedProjects.Add([pscustomobject]@{ Name = $rName; Path = $r.Path; Exists = $true; AssemblyName = $rAsm; Via = $r.Via; Depth = $r.Depth; Files = $n; ReferencedBy = @() })
+        if ($r.Depth -lt 6) { foreach ($rp in (Get-ProjRefPaths $rx (Split-Path -Parent $r.Path))) { $refQueue.Enqueue(@{ Path = $rp; Via = $rName; Depth = $r.Depth + 1 }) } }
+    } catch {
+        $referencedProjects.Add([pscustomobject]@{ Name = $rName; Path = $r.Path; Exists = $true; AssemblyName = $null; Via = $r.Via; Depth = $r.Depth; Files = 0; ReferencedBy = @(); Error = $_.Exception.Message })
+    } finally { $script:projDir = $savedProjDir }
+}
 }
 
 # ---------------------------------------------------------------- solution-wide info (optional)
@@ -672,10 +719,17 @@ if ($SolutionRoot) {
     foreach ($a in $appSerializers) { [void]$appSet.Add($a.Path) }
     foreach ($h in $existingHelpers) { [void]$appSet.Add($h.Path) }
     $appOwners = New-Object 'System.Collections.Generic.Dictionary[string,object]' $cmp
+    $refBy = New-Object 'System.Collections.Generic.Dictionary[string,object]' $cmp
     foreach ($pf in $projFiles) {
         try {
             [xml]$px = Get-Content -LiteralPath $pf.FullName -Raw
             $sdk = [bool]$px.DocumentElement.GetAttribute('Sdk')
+            if ($referencedProjects.Count) {
+                foreach ($rp in (Get-ProjRefPaths $px $pf.DirectoryName)) {
+                    if (-not $refBy.ContainsKey($rp)) { $refBy[$rp] = New-Object System.Collections.Generic.List[string] }
+                    if (-not $refBy[$rp].Contains($pf.BaseName)) { $refBy[$rp].Add($pf.BaseName) }
+                }
+            }
             foreach ($cf in (Get-CompileFiles $pf.FullName $sdk)) {
                 if (-not $files.ContainsKey($cf.Path) -and -not $appSet.Contains($cf.Path)) { continue }
                 if (-not $linkCount.ContainsKey($cf.Path)) { $linkCount[$cf.Path] = New-Object System.Collections.Generic.List[string] }
@@ -689,10 +743,27 @@ if ($SolutionRoot) {
     }
 }
 
+# referenced projects: which projects in the solution reference each one (the projects an edit there affects)
+# direct and indirect: a project that references Bll also runs Common when Bll references Common
+if ($refBy -and $referencedProjects.Count) {
+    $pathByName = @{}
+    foreach ($pf in $projFiles) { if (-not $pathByName.ContainsKey($pf.BaseName)) { $pathByName[$pf.BaseName] = $pf.FullName } }
+    foreach ($rpj in $referencedProjects) {
+        $users = New-Object System.Collections.Generic.List[string]
+        $todo = New-Object System.Collections.Generic.Queue[string]; $todo.Enqueue($rpj.Path)
+        $seenP = New-Object 'System.Collections.Generic.HashSet[string]' $cmp
+        while ($todo.Count) {
+            $cur = $todo.Dequeue(); if (-not $seenP.Add($cur)) { continue }
+            if (-not $refBy.ContainsKey($cur)) { continue }
+            foreach ($u in $refBy[$cur]) { if (-not $users.Contains($u)) { $users.Add($u) }; if ($pathByName.ContainsKey($u)) { $todo.Enqueue($pathByName[$u]) } }
+        }
+        $rpj.ReferencedBy = $users.ToArray()
+    }
+}
 foreach ($a in $appSerializers) {
     if ($linkCount.ContainsKey($a.Path)) { $a.LinkedBy = $linkCount[$a.Path].ToArray() }
     if ($appOwners.ContainsKey($a.Path)) { $a.OwnedBy = $appOwners[$a.Path].ToArray() }
-    $a.CompiledIntoThisProject = $files.ContainsKey($a.Path)
+    $a.CompiledIntoThisProject = ($files.ContainsKey($a.Path) -and $files[$a.Path].Source -ne 'referenced')
     # Reusable = can be linked as one self-contained source file with the static AppSerializer API
     $blockers = New-Object System.Collections.Generic.List[string]
     if ($a.UsesBlockedSerializer) { $blockers.Add('uses JavaScriptSerializer / Newtonsoft (blocked in Sandbox)') }
@@ -711,7 +782,7 @@ foreach ($a in $appSerializers) {
 foreach ($h in $existingHelpers) {
     if ($linkCount.ContainsKey($h.Path)) { $h.LinkedBy = $linkCount[$h.Path].ToArray() }
     if ($SolutionRoot -and $appOwners.ContainsKey($h.Path)) { $h.OwnedBy = $appOwners[$h.Path].ToArray() }
-    $h.CompiledIntoThisProject = $files.ContainsKey($h.Path)
+    $h.CompiledIntoThisProject = ($files.ContainsKey($h.Path) -and $files[$h.Path].Source -ne 'referenced')
     $blockers = New-Object System.Collections.Generic.List[string]
     if (@($h.BlockedApis).Count) { $blockers.Add("uses $((@($h.BlockedApis)) -join ', ') (not Sandbox-safe)") }
     if (-not $h.IsStatic) { $blockers.Add('not a static class') }
@@ -918,6 +989,7 @@ foreach ($f in $files.Values) {
                 $hits.Add([pscustomobject]@{
                     File     = $f.Path
                     Source   = $f.Source
+                    ReferencedProject = $f.ReferencedProject
                     Line     = $i + 1
                     Category = $p.Category
                     Severity = $(if ($isUsing) { 'Using' } else { $p.Severity })
@@ -932,9 +1004,13 @@ foreach ($f in $files.Values) {
         $types = $typeNames.ToArray()
     }
     $sharedBy = $null
-    if ($linkCount.ContainsKey($f.Path)) { $sharedBy = $linkCount[$f.Path].ToArray() }
+    if ($f.Source -eq 'referenced') {
+        $own = $referencedProjects | Where-Object { $_.Name -eq $f.ReferencedProject } | Select-Object -First 1
+        if ($own -and @($own.ReferencedBy).Count) { $sharedBy = @($own.ReferencedBy) }
+    }
+    elseif ($linkCount.ContainsKey($f.Path)) { $sharedBy = $linkCount[$f.Path].ToArray() }
     $fileRows.Add([pscustomobject]@{
-        Path = $f.Path; Source = $f.Source; Include = $f.Include; Link = $f.Link
+        Path = $f.Path; Source = $f.Source; Include = $f.Include; Link = $f.Link; ReferencedProject = $f.ReferencedProject
         Exists = $exists; Hits = $count; Types = $types
         SharedByProjects = $(if ($sharedBy) { $sharedBy.Count } else { $null })
         SharedBy = $sharedBy
@@ -993,7 +1069,10 @@ $versionInfo = [pscustomobject]@{
 }
 
 # entry points: classes deriving (directly or through base classes) from IPlugin / CodeActivity
-$entries = Get-EntryTypes $allDecls
+$ownFileSet = New-Object 'System.Collections.Generic.HashSet[string]' $cmp
+foreach ($f in $files.Values) { if ($f.Source -ne 'referenced') { [void]$ownFileSet.Add($f.Path) } }
+$entries = New-Object System.Collections.Generic.List[object]
+foreach ($en in (Get-EntryTypes $allDecls)) { if ($ownFileSet.Contains([string]$en.File)) { $entries.Add($en) } }
 $plugins = New-Object System.Collections.Generic.List[string]; $workflows = New-Object System.Collections.Generic.List[string]
 foreach ($en in $entries) { if ($en.Kind -eq 'Plugin') { $plugins.Add($en.FullName) } else { $workflows.Add($en.FullName) } }
 $assumedEntries = @($entries | Where-Object { $_.AssumedFromBase } | ForEach-Object { [pscustomobject]@{ Class = $_.FullName; Kind = $_.Kind; Base = $_.AssumedFromBase; Note = 'base class is not in the source (referenced DLL) - confirm it is a plug-in / workflow activity base' } })
@@ -1019,6 +1098,9 @@ foreach ($pk in $packages) {
     $deps.Add([pscustomobject]@{ Name = $nm; Kind = 'packages.config'; Detail = ($pk -split ' ')[1] })
 }
 foreach ($pj in $projRefs) { $deps.Add([pscustomobject]@{ Name = [IO.Path]::GetFileNameWithoutExtension(($pj -replace '[\\/]', $sep)); Kind = 'ProjectReference'; Detail = $pj }) }
+foreach ($rpj in ($referencedProjects | Where-Object { $_.Depth -gt 1 })) {
+    if (-not ($deps | Where-Object { $_.Name -eq $rpj.Name })) { $deps.Add([pscustomobject]@{ Name = $rpj.Name; Kind = 'ProjectReference (indirect)'; Detail = "through $($rpj.Via)" }) }
+}
 
 # ---- merge tools (ILMerge / ILRepack / Costura): the merged libraries are runtime dependencies even though the built DLL hides them
 $mergeEvidence = New-Object System.Collections.Generic.List[string]
@@ -1194,7 +1276,7 @@ if ($serStrategy -eq 'existing') {
         SerializeCall = [string](Get-Prop $ser 'serializeCall' ''); DeserializeCall = [string](Get-Prop $ser 'deserializeCall' '')
         Usings = @(Get-Prop $ser 'usings' @()); DateStyle = [string](Get-Prop $ser 'dateStyle' '')
         SandboxSafe = ($allProblems.Count -eq 0); Problems = $allProblems.ToArray()
-        CompiledIntoThisProject = @($serFiles | Where-Object { $files.ContainsKey($_) }).Count -eq $serFiles.Count
+        CompiledIntoThisProject = @($serFiles | Where-Object { $files.ContainsKey($_) -and $files[$_].Source -ne 'referenced' }).Count -eq $serFiles.Count
     }
 } else {
     $serializerCheck = [pscustomobject]@{
@@ -1218,7 +1300,8 @@ $result = [pscustomobject]@{
     ProjectStyle       = $(if ($isSdk) { 'sdk' } else { 'legacy' })
     TargetFramework    = $targetFw
     Counts             = [pscustomobject]@{
-        Files   = $fileList.Count
+        Files   = @($fileList | Where-Object Source -ne 'referenced').Count
+        Referenced = @($fileList | Where-Object Source -eq 'referenced').Count
         Local   = @($fileList | Where-Object Source -eq 'local').Count
         Linked  = @($fileList | Where-Object Source -eq 'linked').Count
         Shared  = @($fileList | Where-Object Source -eq 'shared').Count
@@ -1243,6 +1326,7 @@ $result = [pscustomobject]@{
     PackageReferences  = $pkgRefs
     PackagesConfig     = $packages
     ProjectReferences  = $projRefs
+    ReferencedProjects = $referencedProjects.ToArray()
     SolutionRoot       = $SolutionRoot
     SolutionProjects   = $solutionProjects
     ExistingAppSerializers = @($appSerializers)
@@ -1257,6 +1341,13 @@ $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $OutFile -Encoding 
 $c = $result.Counts
 Write-Output "Project: $projName ($($result.ProjectStyle), $targetFw) -> $assemblyName.dll"
 Write-Output "Files: $($c.Files) compiled ($($c.Local) local, $($c.Linked) linked, $($c.Shared) shared) | missing: $($c.Missing) | unresolved includes: $($unresolved.Count)"
+if ($referencedProjects.Count) {
+    Write-Output ("Referenced projects: {0} (+{1} files scanned - their code runs in this plug-in, but in its own DLL)" -f $referencedProjects.Count, $c.Referenced)
+    foreach ($rpj in $referencedProjects) {
+        $rh = @($hits | Where-Object { $_.ReferencedProject -eq $rpj.Name -and -not $_.Accepted -and $_.Severity -in @('Blocked', 'Avoid', 'Review') }).Count
+        Write-Output ("  {0}{1}: {2} files, {3} finding(s){4}{5}" -f $rpj.Name, $(if ($rpj.Depth -gt 1) { " (via $($rpj.Via))" } else { '' }), $rpj.Files, $rh, $(if (@($rpj.ReferencedBy).Count) { "; referenced by $(@($rpj.ReferencedBy).Count) project(s)" } else { '' }), $(if (-not $rpj.Exists) { ' - PROJECT FILE NOT FOUND' } else { '' }))
+    }
+}
 Write-Output "Hits: $($c.Hits) in $($c.FilesWithHits) files (Blocked $($c.Blocked), Avoid $($c.Avoid), Review $($c.Review), Harden $($c.Harden), Using $(@($hits | Where-Object Severity -eq 'Using').Count), Accepted $($c.Accepted))"
 Write-Output ("Settings: {0}" -f $(if ($cfgPath) { $cfgPath } else { 'none (defaults)' }))
 foreach ($e in $cfgErrors) { Write-Output "  ERROR: $e" }

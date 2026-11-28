@@ -17,7 +17,7 @@ Read this when Step 0 selects **batch report** or **batch migrate**. The develop
    ```
    It runs `scan.ps1` on every `.csproj` under the folder (seconds per project) and writes:
    - `Projects[]` — per project: `Status` (`scanned` / `skipped` / `error`), `SkipReason`, `Kind`, `Framework`, files, `Blocked` / `Avoid` / `Review` (local files only, accepted findings excluded), `HttpCalls`, `UrlProblems`, `UrlsToConfirm`, `LoopRisks`, `DependencyCandidates` (`.csproj` references to check — **not** confirmed dependencies), `Signing`, `Effort` (Low / Medium / High), `OnlineEstimate` (`ok` / `warn` / `fail`) with `OnlineWhy`, and `ScanFile` (the full scanner JSON)
-   - `SharedProblems[]` — linked / shared files with blocked APIs that several projects in the batch compile: `File`, `Apis`, `Members`, `Projects`
+   - `SharedProblems[]` — linked / shared files, and files in **referenced projects** (`InReferencedProject`), with blocked APIs that several projects in the batch use: `File`, `InReferencedProject`, `Apis`, `Members`, `Projects`
    - `RecommendedOrder` — easy projects first
    Skipped automatically: projects in `skipProjects`, projects with no plug-in / workflow classes, and names that look like full trust (API / Portal / web / test / console). Mention them; `-IncludeAll` scans them anyway if the developer insists.
 3. Show the developer a compact table (project, effort, online estimate, main reason) and the shared problem files. Effort and online readiness are **estimates from raw scanner findings** — say so.

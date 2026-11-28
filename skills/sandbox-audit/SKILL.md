@@ -146,6 +146,19 @@ A linked file is ONE physical file compiled into every project that links it. `F
 4. **Unsure whether a path is live** (e.g. called through reflection, virtual dispatch, or a public API used by many callers) → do NOT edit, whatever the number of projects — list it under **"Needs decision"** with the call path you found and the projects in `SharedBy`, and let the developer choose. A shared file is edited only with a proven live call path, or when the developer says so.
 5. Never edit a shared file just because it contains a blocked API.
 
+### Referenced Projects (`<ProjectReference>`)
+
+The plug-in calls code in other projects of the solution (e.g. a `Bll` or `Common` project). That code is built into **its own DLL**, but it runs **inside this plug-in, in Sandbox** — so the scanner follows every `<ProjectReference>`, including indirect ones, and scans their files: `Files[]` with `Source = 'referenced'` and `ReferencedProject`, hits with `ReferencedProject`, and `ReferencedProjects[]` (`Name`, `AssemblyName`, `Via`, `Depth`, `Files`, `ReferencedBy` — every project in the solution that uses it, directly or indirectly).
+
+1. **Treat every referenced file like a shared file** (Shared File Rule above), with `SharedBy` = the projects that reference that project. Trace the call path **from this plug-in's entry points into the referenced project**: only code the plug-in actually reaches matters.
+2. **Live and fixable** → same behaviour-identical fixes; list the referenced project **and every project in `ReferencedBy`** under "Projects to rebuild". Unsure, or used by many projects → **Needs decision**, never a silent edit.
+3. **Report the findings under the referenced project's name** ("in referenced project `Bll`: `Service.ToJson` uses JavaScriptSerializer"), so the team knows the fix belongs there, not in the plug-in.
+4. **A referenced project that is not found** (`Exists = false`) → say its code could not be checked.
+5. **Dependencies.** Each referenced project is a DLL this plug-in needs at run time (`Dll.RuntimeDependencies` after the build; indirect ones too). Online readiness:
+   - plug-ins only → ⚠️ "deploy as a plug-in package with the referenced DLLs, or include the code as linked files"
+   - **any workflow activity** → ❌ plug-in packages are not possible. **Needs decision** for the team: switch the `<ProjectReference>` to **linked files** (`<Compile Include="..\Bll\Service.cs"><Link>...</Link></Compile>` for the files the plug-in uses — the referenced files are listed in `Files[]`), or move the code. The skill never makes this change on its own: it changes how the project builds.
+   - **on-premises Sandbox** → referenced DLLs must reach the server too (ILMerge is the usual workaround there — report, do not add it).
+
 ### Caller Verification (local files)
 
 Applies to individual METHODS, never to whole files.

@@ -86,7 +86,7 @@ foreach ($pf in $projects) {
         $serializerHits = @($localLive | Where-Object { $_.Api -match 'JavaScriptSerializer|JsonConvert|JObject|Newtonsoft|ScriptIgnore' }).Count
 
         foreach ($h in ($sharedLive | Where-Object { $_.Severity -eq 'Blocked' -or $_.Severity -eq 'Avoid' })) {
-            if (-not $sharedHits.ContainsKey($h.File)) { $sharedHits[$h.File] = @{ Apis = New-Object System.Collections.Generic.List[string]; Projects = New-Object System.Collections.Generic.List[string]; Members = New-Object System.Collections.Generic.List[string] } }
+            if (-not $sharedHits.ContainsKey($h.File)) { $sharedHits[$h.File] = @{ Apis = New-Object System.Collections.Generic.List[string]; Projects = New-Object System.Collections.Generic.List[string]; Members = New-Object System.Collections.Generic.List[string]; InProject = $h.ReferencedProject } }
             $e = $sharedHits[$h.File]
             if (-not $e.Apis.Contains($h.Api)) { $e.Apis.Add($h.Api) }
             if (-not $e.Projects.Contains($rowName)) { $e.Projects.Add($rowName) }
@@ -150,7 +150,7 @@ $inBatch = @($rows | Where-Object { $_.Status -eq 'scanned' })
 $batchNames = @($inBatch | ForEach-Object { $_.Name })
 $shared = @($sharedHits.GetEnumerator() | ForEach-Object {
     $usedInBatch = @($_.Value.Projects | Where-Object { $batchNames -contains $_ })
-    [pscustomobject]@{ File = $_.Key; RelativePath = (Get-Rel $_.Key); Apis = $_.Value.Apis.ToArray(); Members = $_.Value.Members.ToArray(); Projects = $usedInBatch; ProjectCount = $usedInBatch.Count }
+    [pscustomobject]@{ File = $_.Key; RelativePath = (Get-Rel $_.Key); InReferencedProject = $_.Value.InProject; Apis = $_.Value.Apis.ToArray(); Members = $_.Value.Members.ToArray(); Projects = $usedInBatch; ProjectCount = $usedInBatch.Count }
 } | Where-Object { $_.ProjectCount -gt 0 } | Sort-Object ProjectCount -Descending)
 
 $rank = @{ Low = 0; Medium = 1; High = 2 }
@@ -182,7 +182,7 @@ foreach ($r in ($inBatch | Sort-Object @{ Expression = { $rank[$_.Effort] } }, N
 }
 if ($shared.Count) {
     Write-Output '--- shared files with blocked APIs (decide once, before the projects) ---'
-    foreach ($s in $shared) { Write-Output ("  {0} - {1} - used by {2} project(s) in this batch" -f $s.RelativePath, ($s.Apis -join ', '), $s.ProjectCount) }
+    foreach ($s in $shared) { Write-Output ("  {0}{1} - {2} - used by {3} project(s) in this batch" -f $s.RelativePath, $(if ($s.InReferencedProject) { " (referenced project $($s.InReferencedProject))" } else { '' }), ($s.Apis -join ', '), $s.ProjectCount) }
 }
 $sk = @($rows | Where-Object { $_.Status -ne 'scanned' })
 if ($sk.Count) {
