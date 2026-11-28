@@ -152,9 +152,10 @@ The plug-in calls code in other projects of the solution (e.g. a `Bll` or `Commo
 
 1. **Treat every referenced file like a shared file** (Shared File Rule above), with `SharedBy` = the projects that reference that project. Trace the call path **from this plug-in's entry points into the referenced project**: only code the plug-in actually reaches matters.
 2. **Live and fixable** → same behaviour-identical fixes; list the referenced project **and every project in `ReferencedBy`** under "Projects to rebuild". Unsure, or used by many projects → **Needs decision**, never a silent edit.
-3. **Report the findings under the referenced project's name** ("in referenced project `Bll`: `Service.ToJson` uses JavaScriptSerializer"), so the team knows the fix belongs there, not in the plug-in.
-4. **A referenced project that is not found** (`Exists = false`) → say its code could not be checked.
-5. **Dependencies.** Each referenced project is a DLL this plug-in needs at run time (`Dll.RuntimeDependencies` after the build; indirect ones too). Online readiness:
+3. **Every edit in a referenced project goes into `Changes`** with `Tag: "REFERENCED"` and the project name — the plug-in's own files may be unchanged, but the migration still changed code. Never summarise such a run as "no changes".
+4. **Report the findings under the referenced project's name** ("in referenced project `Bll`: `Service.ToJson` uses JavaScriptSerializer"), so the team knows the fix belongs there, not in the plug-in.
+5. **A referenced project that is not found** (`Exists = false`) → say its code could not be checked.
+6. **Dependencies.** Each referenced project is a DLL this plug-in needs at run time (`Dll.RuntimeDependencies` after the build; indirect ones too). Online readiness:
    - plug-ins only → ⚠️ "deploy as a plug-in package with the referenced DLLs, or include the code as linked files"
    - **any workflow activity** → ❌ plug-in packages are not possible. **Needs decision** for the team: switch the `<ProjectReference>` to **linked files** (`<Compile Include="..\Bll\Service.cs"><Link>...</Link></Compile>` for the files the plug-in uses — the referenced files are listed in `Files[]`), or move the code. The skill never makes this change on its own: it changes how the project builds.
    - **on-premises Sandbox** → referenced DLLs must reach the server too (ILMerge is the usual workaround there — report, do not add it).

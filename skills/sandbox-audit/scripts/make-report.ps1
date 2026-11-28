@@ -457,6 +457,10 @@ if (Has $d.Changes) {
         , @(((Code $ch.File) + $tag), $desc, (E $ch.Lines))
     }
     Add-Section 'Changes made' (Table @('File', 'Change', 'Lines') $rows)
+} elseif (Has $d.ChangedPaths) {
+    # files changed but no description given: never say "no changes"
+    $rows = foreach ($cp in (Arr $d.ChangedPaths)) { , @((Code $cp), '<span class="muted">Changed - see the code changes (diff) below</span>', '') }
+    Add-Section 'Changes made' (Table @('File', 'Change', 'Lines') $rows)
 } else { Add-Section 'Changes made' '<p class="muted">No source changes were needed.</p>' }
 
 # 2b. Serializer decisions
@@ -485,7 +489,7 @@ if ($scanJson) {
         $realHits = @(Arr $scanJson.Hits | Where-Object { $_.Source -eq 'referenced' -and $_.Severity -ne 'Using' -and -not $_.Accepted })
         $rows = foreach ($rp in (Arr $scanJson.ReferencedProjects)) {
             $ph = @($realHits | Where-Object { $_.ReferencedProject -eq $rp.Name })
-            $sev = @('Blocked', 'Avoid', 'Review') | ForEach-Object { $n = @($ph | Where-Object Severity -eq $_).Count; if ($n) { "$n $_" } }
+            $sev = @('Blocked', 'Avoid', 'Review') | ForEach-Object { $cnt = @($ph | Where-Object Severity -eq $_).Count; if ($cnt) { "$cnt $_" } }
             , @(((Code $rp.Name) + $(if ([int]$rp.Depth -gt 1) { "<div class=""muted small"">through $(E $rp.Via)</div>" } else { '' }) + $(if (-not $rp.Exists) { ' ' + (Badge 'fail' 'project file not found') } else { '' })),
                 (E $rp.Files), $(if ($sev) { E ($sev -join ', ') } else { '<span class="muted">none</span>' }), (E $(if (Has $rp.ReferencedBy) { @(Arr $rp.ReferencedBy).Count } else { '-' })))
         }

@@ -34,7 +34,8 @@ Write the file as **UTF-8**. Every field is optional; empty sections are left ou
     { "File": "MigrateNotesToDocuments.cs", "Tag": "",
       "Description": ["JavaScriptSerializer replaced with AppSerializer.Serialize", "90 s timeout, KeepAlive off"],
       "Lines": "12, 88-104" },
-    { "File": "Helper\\...\\Logger.cs", "Tag": "LINKED", "Description": ["..."], "Lines": "..." }
+    { "File": "Helper\\...\\Logger.cs", "Tag": "LINKED", "Description": ["..."], "Lines": "..." },
+    { "File": "Bll\\...\\RequestBll.cs", "Tag": "REFERENCED", "Description": ["... (project Bll.Request, used by 2 projects)"], "Lines": "..." }
   ],
 
   "SerializerDecisions": [
