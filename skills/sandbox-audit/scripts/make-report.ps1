@@ -430,7 +430,9 @@ $kv = @(
     @('Project', (E $project)),
     @('Assembly', (E $d.Assembly)),
     @('Target environment', (E $d.Target)),
-    @('Files scanned', (E ("{0} ({1} local, {2} linked, {3} shared)" -f $s.FilesScanned, $s.Local, $s.Linked, $s.Shared))),
+    @('Files scanned', $(if ($scanJson -and $scanJson.Counts -and $scanJson.Counts.Referenced) {
+        E ("{0} compiled into this DLL ({1} local, {2} linked, {3} shared) + {4} in {5} referenced project(s)" -f $scanJson.Counts.Files, $scanJson.Counts.Local, $scanJson.Counts.Linked, $scanJson.Counts.Shared, $scanJson.Counts.Referenced, @(Arr $scanJson.ReferencedProjects).Count)
+    } else { E ("{0} ({1} local, {2} linked, {3} shared)" -f $s.FilesScanned, $s.Local, $s.Linked, $s.Shared) })),
     @('Files modified', (E $s.FilesModified)),
     @('New files', $(if (Has $s.NewFiles) { E ((Arr $s.NewFiles) -join ', ') } else { 'None' })),
     @('Build', ($(if ($reportOnly) { '<span class="badge info">not built - report only</span>' } else { Badge $s.BuildResult $s.BuildResult }) + ' ' + (E $s.DllPath))),
@@ -469,14 +471,33 @@ if ($diffBlocks.Count) {
 
 # 4. Linked & shared files
 if ($scanJson) {
-    $lf = @(Arr $scanJson.Files | Where-Object { $_.Source -ne 'local' })
+    $rootForRel = if ($Repo -and (Test-Path -LiteralPath $Repo)) { (Resolve-Path -LiteralPath $Repo).Path } else { $null }
+    $relPath = { param($pth) if ($rootForRel -and $pth.StartsWith($rootForRel, [StringComparison]::OrdinalIgnoreCase)) { $pth.Substring($rootForRel.Length).TrimStart('\', '/') } else { $pth } }
+    $lf = @(Arr $scanJson.Files | Where-Object { $_.Source -ne 'local' -and $_.Source -ne 'referenced' })
+    $rf = @(Arr $scanJson.Files | Where-Object { $_.Source -eq 'referenced' })
+    $body = ''
     if ($lf.Count) {
-        $rootForRel = if ($Repo -and (Test-Path -LiteralPath $Repo)) { (Resolve-Path -LiteralPath $Repo).Path } else { $null }
-        $rows = foreach ($f in $lf) {
-            $fp = if ($rootForRel -and $f.Path.StartsWith($rootForRel, [StringComparison]::OrdinalIgnoreCase)) { $f.Path.Substring($rootForRel.Length).TrimStart('\', '/') } else { $f.Path }
-            , @((E $f.Source.ToUpper()), (Code $fp), (E $(if ($f.SharedByProjects) { $f.SharedByProjects } else { '-' })), (E $f.Hits)) }
-        Add-Section 'Linked & shared files scanned' (Table @('Type', 'File', 'Linked by (projects)', 'Hits') $rows)
+        $rows = foreach ($f in $lf) { , @((E $f.Source.ToUpper()), (Code (& $relPath $f.Path)), (E $(if ($f.SharedByProjects) { $f.SharedByProjects } else { '-' })), (E $f.Hits)) }
+        $body += (Table @('Type', 'File', 'Used by (projects)', 'Hits') $rows)
     }
+    if ($rf.Count -or (Has $scanJson.ReferencedProjects)) {
+        # one line per referenced project, then only the referenced files that have findings
+        $realHits = @(Arr $scanJson.Hits | Where-Object { $_.Source -eq 'referenced' -and $_.Severity -ne 'Using' -and -not $_.Accepted })
+        $rows = foreach ($rp in (Arr $scanJson.ReferencedProjects)) {
+            $ph = @($realHits | Where-Object { $_.ReferencedProject -eq $rp.Name })
+            $sev = @('Blocked', 'Avoid', 'Review') | ForEach-Object { $n = @($ph | Where-Object Severity -eq $_).Count; if ($n) { "$n $_" } }
+            , @(((Code $rp.Name) + $(if ([int]$rp.Depth -gt 1) { "<div class=""muted small"">through $(E $rp.Via)</div>" } else { '' }) + $(if (-not $rp.Exists) { ' ' + (Badge 'fail' 'project file not found') } else { '' })),
+                (E $rp.Files), $(if ($sev) { E ($sev -join ', ') } else { '<span class="muted">none</span>' }), (E $(if (Has $rp.ReferencedBy) { @(Arr $rp.ReferencedBy).Count } else { '-' })))
+        }
+        $body += '<h3>Referenced projects</h3><p class="muted small">Their code runs inside this plug-in (in their own DLLs), so it was scanned too. Only files with findings are listed below.</p>'
+        $body += (Table @('Project', 'Files scanned', 'Findings', 'Used by (projects)') $rows)
+        $withHits = @($rf | Where-Object { [int]$_.Hits -gt 0 } | Sort-Object ReferencedProject, Path)
+        if ($withHits.Count) {
+            $rows = foreach ($f in $withHits) { , @((E $f.ReferencedProject), (Code (& $relPath $f.Path)), (E $(if ($f.SharedByProjects) { $f.SharedByProjects } else { '-' })), (E $f.Hits)) }
+            $body += (Table @('Project', 'File with findings', 'Used by (projects)', 'Hits') $rows)
+        }
+    }
+    if ($body) { Add-Section $(if ($rf.Count -or (Has $scanJson.ReferencedProjects)) { 'Linked, shared and referenced code scanned' } else { 'Linked & shared files scanned' }) $body }
 }
 
 # 5. Blocked APIs left in place
@@ -536,10 +557,26 @@ if ($ns) { Add-Section 'Next steps & testing' $ns }
 
 # Appendix: scanner hits
 if ($scanJson -and (Has $scanJson.Hits)) {
-    $rows = foreach ($h in (Arr $scanJson.Hits | Sort-Object Source, File, Line)) {
-        , @((E ([IO.Path]::GetFileName($h.File) + ':' + $h.Line)), (E $h.Severity), (E $h.Category), (E $h.Api), (E $h.Member))
+    $ownHits = @(Arr $scanJson.Hits | Where-Object { $_.Source -ne 'referenced' } | Sort-Object Source, File, Line)
+    $refHits = @(Arr $scanJson.Hits | Where-Object { $_.Source -eq 'referenced' -and $_.Severity -ne 'Using' })
+    $body = '<p class="muted small">Raw pattern hits before analysis. Not every hit is a violation - see sections above for what was fixed and why.</p>'
+    if ($ownHits.Count) {
+        $rows = foreach ($h in $ownHits) { , @((E ([IO.Path]::GetFileName($h.File) + ':' + $h.Line)), (E $h.Severity), (E $h.Category), (E $h.Api), (E $h.Member)) }
+        $body += (Table @('Location', 'Severity', 'Category', 'API', 'Method') $rows)
     }
-    Add-Section 'Appendix - scanner findings' ('<p class="muted small">Raw pattern hits before analysis. Not every hit is a violation - see sections above for what was fixed and why.</p>' + (Table @('Location', 'Severity', 'Category', 'API', 'Method') $rows))
+    if ($refHits.Count) {
+        # referenced projects: one row per file, APIs counted - the full list is in the scanner JSON
+        $rows = foreach ($g in ($refHits | Group-Object ReferencedProject, File | Sort-Object Name)) {
+            $first = $g.Group[0]
+            $apis = @($g.Group | Group-Object Api | Sort-Object Count -Descending | ForEach-Object { if ($_.Count -gt 1) { "$($_.Name) x$($_.Count)" } else { $_.Name } })
+            $worst = if (@($g.Group | Where-Object Severity -eq 'Blocked').Count) { 'Blocked' } elseif (@($g.Group | Where-Object Severity -eq 'Avoid').Count) { 'Avoid' } else { @($g.Group)[0].Severity }
+            $lines = @($g.Group | ForEach-Object { $_.Line } | Sort-Object { [int]$_ } -Unique)
+            , @((E $first.ReferencedProject), (E ([IO.Path]::GetFileName($first.File) + ':' + ($(if ($lines.Count -gt 4) { ($lines[0..3] -join ',') + ',...' } else { $lines -join ',' })))), (E $worst), (E ($apis -join ', ')))
+        }
+        $body += '<h3>In referenced projects</h3><p class="muted small">Grouped per file. Most of this code is not reached from this plug-in - section "Blocked APIs left in place" says which.</p>'
+        $body += (Table @('Project', 'File : lines', 'Worst', 'APIs') $rows)
+    }
+    Add-Section 'Appendix - scanner findings' $body
 }
 
 }   # end single-project sections
